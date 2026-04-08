@@ -57,6 +57,48 @@ app.use(grantMiddleware);
 // Broker router
 app.use(buildBrokerRouter(relayServer, sessions));
 
+// Inbound webhook forwarding: /u/:uuid/hooks/*
+// Accepts any HTTP method. Reads the raw body, forwards via the WebSocket tunnel
+// to the connected daemon, and streams the daemon's response back to the caller.
+app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
+  const uuid = req.params.uuid;
+  const hookPath = "/hooks/" + (req.params.path ?? "");
+
+  if (!relayServer.hasClient(uuid)) {
+    res.status(502).json({ error: "daemon not connected" });
+    return;
+  }
+
+  const headers: Record<string, string[]> = {};
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue;
+    headers[key] = Array.isArray(value) ? value : [value];
+  }
+
+  const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+
+  relayServer
+    .forward(uuid, req.method, hookPath, headers, body)
+    .then((response) => {
+      res.status(response.status);
+      if (response.headers !== undefined) {
+        for (const [k, vals] of Object.entries(response.headers)) {
+          for (const v of vals) {
+            res.append(k, v);
+          }
+        }
+      }
+      if (response.body !== undefined && response.body !== "") {
+        res.send(Buffer.from(response.body, "base64"));
+      } else {
+        res.end();
+      }
+    })
+    .catch(() => {
+      res.status(504).json({ error: "forwarding failed or timed out" });
+    });
+});
+
 // Health check
 app.get("/health", (_req, res) => {
   res.json({ ok: true });

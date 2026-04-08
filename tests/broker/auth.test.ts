@@ -45,7 +45,7 @@ function buildHelloPayload(nonce: string, timestamp: number): Buffer {
   const nonceBytes = Buffer.from(nonce, "hex");
   const tsBytes = Buffer.allocUnsafe(8);
   tsBytes.writeBigUInt64BE(BigInt(timestamp));
-  return createHash("sha256").update(nonceBytes).update(tsBytes).digest();
+  return Buffer.concat([nonceBytes, tsBytes]);
 }
 
 /** Perform full relay handshake for a given identity, return connected ws */

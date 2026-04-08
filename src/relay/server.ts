@@ -366,13 +366,15 @@ export class RelayServer {
     }
 
     // Step 5: Verify ECDSA signature over sha256(nonce_bytes || timestamp_be_uint64)
+    // The Go client signs the raw sha256 digest with ecdsa.SignASN1, so we must
+    // use createVerify("SHA256") on the raw (nonce || timestamp) bytes — Node's
+    // createVerify("SHA256") hashes its input internally before verifying.
     const nonceBytes = Buffer.from(nonce, "hex");
     const tsBytes = Buffer.allocUnsafe(8);
     tsBytes.writeBigUInt64BE(BigInt(hello.timestamp));
-    const message = createHash("sha256").update(nonceBytes).update(tsBytes).digest();
+    const message = Buffer.concat([nonceBytes, tsBytes]);
 
     try {
-      // Import the raw uncompressed key as an EC key for verification
       const verify = createVerify("SHA256");
       verify.update(message);
       // Node.js accepts the raw 65-byte uncompressed key if we specify format correctly
