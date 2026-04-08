@@ -5,7 +5,7 @@
  *  - RelayServer (WebSocket tunnel)
  *  - Grant OAuth middleware
  *  - Broker Express router
- * and starts an HTTP(S) server on PORT (default 8080).
+ * and starts an HTTP(S) server on PORT (default 5553).
  *
  * TLS: if TLS_CERT_FILE and TLS_KEY_FILE are set, creates an HTTPS server.
  * Otherwise, creates a plain HTTP server (for use behind Cloudflare/nginx TLS termination).
@@ -21,7 +21,7 @@ import { buildBrokerRouter } from "./broker/router.js";
 import { SessionStore } from "./broker/sessions.js";
 import { PROVIDER_CONFIGS } from "./broker/providers.js";
 
-const PORT = parseInt(process.env.PORT ?? "8080", 10);
+const PORT = parseInt(process.env.PORT ?? "5553", 10);
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT.toString()}`;
 const TLS_CERT_FILE = process.env.TLS_CERT_FILE;
 const TLS_KEY_FILE = process.env.TLS_KEY_FILE;

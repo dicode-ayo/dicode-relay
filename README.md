@@ -60,7 +60,7 @@ For production, build and run with Docker:
 
 ```sh
 docker build -t dicode-relay .
-docker run -p 8080:8080 --env-file .env dicode-relay
+docker run -p 5553:5553 --env-file .env dicode-relay
 ```
 
 ---
@@ -69,7 +69,7 @@ docker run -p 8080:8080 --env-file .env dicode-relay
 
 | Variable | Required | Description |
 |---|---|---|
-| `PORT` | No | Port to listen on (default: `8080`) |
+| `PORT` | No | Port to listen on (default: `5553`) |
 | `BASE_URL` | Yes | Public base URL, e.g. `https://relay.dicode.app` — used in relay welcome messages |
 | `TLS_CERT_FILE` | No | Path to PEM TLS certificate (skip if TLS terminated externally) |
 | `TLS_KEY_FILE` | No | Path to PEM TLS private key |
@@ -199,7 +199,7 @@ See [docs/design/oauth-broker.md](../dicode/docs/design/oauth-broker.md) for the
 ```sh
 docker build -t dicode-relay .
 docker run -d \
-  -p 8080:8080 \
+  -p 5553:5553 \
   -e BASE_URL=https://relay.dicode.app \
   -e GITHUB_CLIENT_ID=xxx \
   -e GITHUB_CLIENT_SECRET=yyy \
@@ -223,7 +223,7 @@ server {
     server_name relay.dicode.app;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:5553;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
