@@ -21,7 +21,7 @@ export const ChallengeMessageSchema = z.object({
 export const WelcomeMessageSchema = z.object({
   type: z.literal("welcome"),
   /** Full WSS URL for this client, e.g. wss://relay.dicode.app/u/<uuid>/hooks/ */
-  url: z.string().url(),
+  url: z.url(),
 });
 
 export const ErrorMessageSchema = z.object({
@@ -36,7 +36,7 @@ export const ErrorMessageSchema = z.object({
 export const RequestMessageSchema = z.object({
   type: z.literal("request"),
   /** UUIDv4 used to correlate the response */
-  id: z.string().uuid(),
+  id: z.uuid(),
   method: z.string(),
   path: z.string(),
   headers: z.record(z.string(), z.array(z.string())),
@@ -69,7 +69,7 @@ export const HelloMessageSchema = z.object({
 export const ResponseMessageSchema = z.object({
   type: z.literal("response"),
   /** Matches the `id` from the corresponding RequestMessage */
-  id: z.string().uuid(),
+  id: z.uuid(),
   status: z.number().int().min(100).max(599),
   headers: z.record(z.string(), z.array(z.string())),
   /** Base64-encoded response body */
