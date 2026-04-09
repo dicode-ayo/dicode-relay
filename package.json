@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts",
+    "dev": "STATUS_PASSWORD=admin tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

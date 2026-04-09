@@ -5,22 +5,24 @@ export function buildStatusJson(snapshot: StatusSnapshot): StatusSnapshot {
 }
 
 export function renderStatusPage(snapshot: StatusSnapshot): string {
-  const { global, process: proc, clients } = snapshot;
+  const { global, peak, process: proc, clients } = snapshot;
   const rssM = (proc.rssBytes / 1_048_576).toFixed(1);
   const heapUsedM = (proc.heapUsedBytes / 1_048_576).toFixed(1);
   const heapTotalM = (proc.heapTotalBytes / 1_048_576).toFixed(1);
+  const peakRssM = (peak.rssBytes / 1_048_576).toFixed(1);
+  const peakHeapM = (peak.heapUsedBytes / 1_048_576).toFixed(1);
 
   const clientRows =
     clients.length === 0
-      ? `<tr><td colspan="6" style="text-align:center;color:#888">No clients connected</td></tr>`
+      ? `<tr><td colspan="7" style="text-align:center;color:#888">No clients connected</td></tr>`
       : clients
           .map(
             (c) => `<tr>
           <td title="${esc(c.uuid)}">${esc(c.uuid.substring(0, 12))}...</td>
           <td>${esc(c.connectedDuration)}</td>
-          <td>${c.reqPerSec.toString()}</td>
-          <td>${c.reqPerHour.toString()}</td>
-          <td>${c.reqPerDay.toString()}</td>
+          <td>${c.reqPerSec.toString()} <span class="peak">(${c.peakReqPerSec.toString()})</span></td>
+          <td>${c.reqPerHour.toString()} <span class="peak">(${c.peakReqPerHour.toString()})</span></td>
+          <td>${c.reqPerDay.toString()} <span class="peak">(${c.peakReqPerDay.toString()})</span></td>
           <td>${c.totalRequests.toString()}</td>
         </tr>`,
           )
@@ -43,6 +45,8 @@ export function renderStatusPage(snapshot: StatusSnapshot): string {
   .card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 12px; }
   .card .label { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; }
   .card .value { font-size: 1.3rem; color: #f0f6fc; margin-top: 4px; }
+  .card .peak-label { color: #8b949e; font-size: 0.7rem; margin-top: 2px; }
+  .peak { color: #8b949e; font-size: 0.75rem; }
   table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #21262d; border-radius: 6px; overflow: hidden; }
   th { text-align: left; padding: 8px 12px; background: #21262d; color: #8b949e; font-size: 0.75rem; text-transform: uppercase; }
   td { padding: 8px 12px; border-top: 1px solid #21262d; font-size: 0.85rem; }
@@ -58,19 +62,19 @@ export function renderStatusPage(snapshot: StatusSnapshot): string {
   <div class="section">
     <h2>Process</h2>
     <div class="grid">
-      <div class="card"><div class="label">CPU</div><div class="value" id="cpu">${proc.cpuPercent.toString()}%</div></div>
-      <div class="card"><div class="label">RSS</div><div class="value" id="rss">${rssM} MB</div></div>
-      <div class="card"><div class="label">Heap</div><div class="value" id="heap">${heapUsedM} / ${heapTotalM} MB</div></div>
+      <div class="card"><div class="label">CPU</div><div class="value" id="cpu">${proc.cpuPercent.toString()}%</div><div class="peak-label" id="p-cpu">peak: ${peak.cpuPercent.toString()}%</div></div>
+      <div class="card"><div class="label">RSS</div><div class="value" id="rss">${rssM} MB</div><div class="peak-label" id="p-rss">peak: ${peakRssM} MB</div></div>
+      <div class="card"><div class="label">Heap</div><div class="value" id="heap">${heapUsedM} / ${heapTotalM} MB</div><div class="peak-label" id="p-heap">peak: ${peakHeapM} MB</div></div>
     </div>
   </div>
 
   <div class="section">
     <h2>Global</h2>
     <div class="grid">
-      <div class="card"><div class="label">Connected</div><div class="value" id="g-clients">${global.connectedClients.toString()}</div></div>
-      <div class="card"><div class="label">Req/sec</div><div class="value" id="g-rps">${global.reqPerSec.toString()}</div></div>
-      <div class="card"><div class="label">Req/hour</div><div class="value" id="g-rph">${global.reqPerHour.toString()}</div></div>
-      <div class="card"><div class="label">Req/day</div><div class="value" id="g-rpd">${global.reqPerDay.toString()}</div></div>
+      <div class="card"><div class="label">Connected</div><div class="value" id="g-clients">${global.connectedClients.toString()}</div><div class="peak-label" id="p-clients">peak: ${peak.connectedClients.toString()}</div></div>
+      <div class="card"><div class="label">Req/sec</div><div class="value" id="g-rps">${global.reqPerSec.toString()}</div><div class="peak-label" id="p-rps">peak: ${peak.reqPerSec.toString()}</div></div>
+      <div class="card"><div class="label">Req/hour</div><div class="value" id="g-rph">${global.reqPerHour.toString()}</div><div class="peak-label" id="p-rph">peak: ${peak.reqPerHour.toString()}</div></div>
+      <div class="card"><div class="label">Req/day</div><div class="value" id="g-rpd">${global.reqPerDay.toString()}</div><div class="peak-label" id="p-rpd">peak: ${peak.reqPerDay.toString()}</div></div>
     </div>
   </div>
 
@@ -86,7 +90,7 @@ export function renderStatusPage(snapshot: StatusSnapshot): string {
     </table>
   </div>
 
-  <div class="refresh-indicator" id="refresh-status">Auto-refreshing every 5s</div>
+  <div class="refresh-indicator" id="refresh-status">Auto-refreshing every 1s</div>
 
   <script>
     async function refresh() {
@@ -100,16 +104,23 @@ export function renderStatusPage(snapshot: StatusSnapshot): string {
         document.getElementById("cpu").textContent = p.cpuPercent + "%";
         document.getElementById("rss").textContent = (p.rssBytes / 1048576).toFixed(1) + " MB";
         document.getElementById("heap").textContent = (p.heapUsedBytes / 1048576).toFixed(1) + " / " + (p.heapTotalBytes / 1048576).toFixed(1) + " MB";
+        document.getElementById("p-cpu").textContent = "peak: " + d.peak.cpuPercent + "%";
+        document.getElementById("p-rss").textContent = "peak: " + (d.peak.rssBytes / 1048576).toFixed(1) + " MB";
+        document.getElementById("p-heap").textContent = "peak: " + (d.peak.heapUsedBytes / 1048576).toFixed(1) + " MB";
         document.getElementById("g-clients").textContent = d.global.connectedClients;
         document.getElementById("g-rps").textContent = d.global.reqPerSec;
         document.getElementById("g-rph").textContent = d.global.reqPerHour;
         document.getElementById("g-rpd").textContent = d.global.reqPerDay;
+        document.getElementById("p-clients").textContent = "peak: " + d.peak.connectedClients;
+        document.getElementById("p-rps").textContent = "peak: " + d.peak.reqPerSec;
+        document.getElementById("p-rph").textContent = "peak: " + d.peak.reqPerHour;
+        document.getElementById("p-rpd").textContent = "peak: " + d.peak.reqPerDay;
         const tbody = document.getElementById("client-table");
         if (d.clients.length === 0) {
           tbody.textContent = "";
           const row = document.createElement("tr");
           const cell = document.createElement("td");
-          cell.setAttribute("colspan", "6");
+          cell.setAttribute("colspan", "7");
           cell.style.textAlign = "center";
           cell.style.color = "#888";
           cell.textContent = "No clients connected";
@@ -127,13 +138,13 @@ export function renderStatusPage(snapshot: StatusSnapshot): string {
             durCell.textContent = c.connectedDuration;
             row.appendChild(durCell);
             const rpsCell = document.createElement("td");
-            rpsCell.textContent = c.reqPerSec;
+            rpsCell.innerHTML = c.reqPerSec + ' <span class="peak">(' + c.peakReqPerSec + ')</span>';
             row.appendChild(rpsCell);
             const rphCell = document.createElement("td");
-            rphCell.textContent = c.reqPerHour;
+            rphCell.innerHTML = c.reqPerHour + ' <span class="peak">(' + c.peakReqPerHour + ')</span>';
             row.appendChild(rphCell);
             const rpdCell = document.createElement("td");
-            rpdCell.textContent = c.reqPerDay;
+            rpdCell.innerHTML = c.reqPerDay + ' <span class="peak">(' + c.peakReqPerDay + ')</span>';
             row.appendChild(rpdCell);
             const totalCell = document.createElement("td");
             totalCell.textContent = c.totalRequests;
@@ -141,12 +152,12 @@ export function renderStatusPage(snapshot: StatusSnapshot): string {
             tbody.appendChild(row);
           });
         }
-        document.getElementById("refresh-status").textContent = "Auto-refreshing every 5s";
+        document.getElementById("refresh-status").textContent = "Auto-refreshing every 1s";
       } catch {
         document.getElementById("refresh-status").textContent = "Connection lost - retrying...";
       }
     }
-    setInterval(refresh, 5000);
+    setInterval(refresh, 1000);
   </script>
 </body>
 </html>`;

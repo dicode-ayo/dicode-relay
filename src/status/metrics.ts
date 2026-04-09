@@ -11,6 +11,9 @@ interface ClientMetricsEntry {
   hourIndex: number;
   hourEpoch: number;
   totalRequests: number;
+  peakReqPerSec: number;
+  peakReqPerHour: number;
+  peakReqPerDay: number;
 }
 
 export interface ClientSnapshot {
@@ -21,6 +24,9 @@ export interface ClientSnapshot {
   reqPerHour: number;
   reqPerDay: number;
   totalRequests: number;
+  peakReqPerSec: number;
+  peakReqPerHour: number;
+  peakReqPerDay: number;
 }
 
 export interface ProcessSnapshot {
@@ -31,6 +37,16 @@ export interface ProcessSnapshot {
   cpuPercent: number;
 }
 
+export interface PeakValues {
+  connectedClients: number;
+  reqPerSec: number;
+  reqPerHour: number;
+  reqPerDay: number;
+  rssBytes: number;
+  heapUsedBytes: number;
+  cpuPercent: number;
+}
+
 export interface StatusSnapshot {
   global: {
     connectedClients: number;
@@ -38,6 +54,7 @@ export interface StatusSnapshot {
     reqPerHour: number;
     reqPerDay: number;
   };
+  peak: PeakValues;
   process: ProcessSnapshot;
   clients: ClientSnapshot[];
 }
@@ -47,6 +64,14 @@ export class MetricsCollector {
   private lastCpuUsage = process.cpuUsage();
   private lastCpuTime = Date.now();
   private cachedCpuPercent = 0;
+
+  private peakConnectedClients = 0;
+  private peakReqPerSec = 0;
+  private peakReqPerHour = 0;
+  private peakReqPerDay = 0;
+  private peakRssBytes = 0;
+  private peakHeapUsedBytes = 0;
+  private peakCpuPercent = 0;
 
   registerClient(uuid: string): void {
     const nowSec = Math.floor(Date.now() / 1000);
@@ -61,6 +86,9 @@ export class MetricsCollector {
       hourIndex: 0,
       hourEpoch: nowHour,
       totalRequests: 0,
+      peakReqPerSec: 0,
+      peakReqPerHour: 0,
+      peakReqPerDay: 0,
     });
   }
 
@@ -103,6 +131,10 @@ export class MetricsCollector {
       const reqPerHour = sumUint32Array(entry.secondBuckets);
       const reqPerDay = sumUint32Array(entry.hourBuckets);
 
+      entry.peakReqPerSec = Math.max(entry.peakReqPerSec, reqPerSec);
+      entry.peakReqPerHour = Math.max(entry.peakReqPerHour, reqPerHour);
+      entry.peakReqPerDay = Math.max(entry.peakReqPerDay, reqPerDay);
+
       globalReqPerSec += reqPerSec;
       globalReqPerHour += reqPerHour;
       globalReqPerDay += reqPerDay;
@@ -115,10 +147,24 @@ export class MetricsCollector {
         reqPerHour,
         reqPerDay,
         totalRequests: entry.totalRequests,
+        peakReqPerSec: entry.peakReqPerSec,
+        peakReqPerHour: entry.peakReqPerHour,
+        peakReqPerDay: entry.peakReqPerDay,
       });
     }
 
     clients.sort((a, b) => b.totalRequests - a.totalRequests);
+
+    const proc = this.processSnapshot();
+
+    // Update global peaks
+    this.peakConnectedClients = Math.max(this.peakConnectedClients, this.entries.size);
+    this.peakReqPerSec = Math.max(this.peakReqPerSec, globalReqPerSec);
+    this.peakReqPerHour = Math.max(this.peakReqPerHour, globalReqPerHour);
+    this.peakReqPerDay = Math.max(this.peakReqPerDay, globalReqPerDay);
+    this.peakRssBytes = Math.max(this.peakRssBytes, proc.rssBytes);
+    this.peakHeapUsedBytes = Math.max(this.peakHeapUsedBytes, proc.heapUsedBytes);
+    this.peakCpuPercent = Math.max(this.peakCpuPercent, proc.cpuPercent);
 
     return {
       global: {
@@ -127,7 +173,16 @@ export class MetricsCollector {
         reqPerHour: globalReqPerHour,
         reqPerDay: globalReqPerDay,
       },
-      process: this.processSnapshot(),
+      peak: {
+        connectedClients: this.peakConnectedClients,
+        reqPerSec: this.peakReqPerSec,
+        reqPerHour: this.peakReqPerHour,
+        reqPerDay: this.peakReqPerDay,
+        rssBytes: this.peakRssBytes,
+        heapUsedBytes: this.peakHeapUsedBytes,
+        cpuPercent: this.peakCpuPercent,
+      },
+      process: proc,
       clients,
     };
   }
