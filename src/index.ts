@@ -72,35 +72,6 @@ app.use(grantMiddleware);
 // Broker router
 app.use(buildBrokerRouter(relayServer, sessions));
 
-// Forward /u/:uuid/dicode.js to the daemon's webhook handler (serves the client SDK).
-app.get("/u/:uuid/dicode.js", (req, res) => {
-  const uuid = req.params.uuid;
-  if (!relayServer.hasClient(uuid)) {
-    res.status(502).json({ error: "daemon not connected" });
-    return;
-  }
-  relayServer
-    .forward(uuid, "GET", "/dicode.js", {}, Buffer.alloc(0))
-    .then((response) => {
-      res.status(response.status);
-      if (response.headers !== undefined) {
-        for (const [k, vals] of Object.entries(response.headers)) {
-          for (const v of vals) {
-            res.append(k, v);
-          }
-        }
-      }
-      if (response.body !== undefined && response.body !== "") {
-        res.send(Buffer.from(response.body, "base64"));
-      } else {
-        res.end();
-      }
-    })
-    .catch(() => {
-      res.status(504).json({ error: "forwarding failed or timed out" });
-    });
-});
-
 // Inbound webhook forwarding: /u/:uuid/hooks/*
 // Accepts any HTTP method. Reads the raw body, forwards via the WebSocket tunnel
 // to the connected daemon, and streams the daemon's response back to the caller.
@@ -137,32 +108,7 @@ app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req
         }
       }
       if (response.body !== undefined && response.body !== "") {
-        const bodyBuf = Buffer.from(response.body, "base64");
-        // Rewrite absolute paths in HTML responses so assets load through the relay.
-        const ct = res.getHeader("content-type");
-        const isHtml = typeof ct === "string" && ct.includes("text/html");
-        if (isHtml) {
-          const relayPrefix = `/u/${uuid}`;
-          let html = bodyBuf.toString("utf8");
-          // <base href="/hooks/foo/"> → <base href="/u/<uuid>/hooks/foo/">
-          html = html.replace(
-            /(<base\s+href=")([^"]*")/i,
-            (_m, tag: string, href: string) => tag + relayPrefix + href,
-          );
-          // <script src="/dicode.js"> → <script src="/u/<uuid>/dicode.js">
-          html = html.replace(
-            /(<script\s+src=")(\/dicode\.js")/i,
-            (_m, tag: string, src: string) => tag + relayPrefix + src,
-          );
-          // <meta name="dicode-hook" content="/hooks/foo"> → content="/u/<uuid>/hooks/foo"
-          html = html.replace(
-            /(<meta\s+name="dicode-hook"\s+content=")([^"]*")/i,
-            (_m, tag: string, val: string) => tag + relayPrefix + val,
-          );
-          res.send(html);
-        } else {
-          res.send(bodyBuf);
-        }
+        res.send(Buffer.from(response.body, "base64"));
       } else {
         res.end();
       }
