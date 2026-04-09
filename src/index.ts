@@ -20,6 +20,9 @@ import { buildGrantMiddleware } from "./broker/grant.js";
 import { buildBrokerRouter } from "./broker/router.js";
 import { SessionStore } from "./broker/sessions.js";
 import { PROVIDER_CONFIGS } from "./broker/providers.js";
+import { MetricsCollector } from "./status/metrics.js";
+import { statusAuth } from "./status/auth.js";
+import { renderStatusPage, buildStatusJson } from "./status/page.js";
 
 const PORT = parseInt(process.env.PORT ?? "5553", 10);
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT.toString()}`;
@@ -46,6 +49,18 @@ if (TLS_CERT_FILE !== undefined && TLS_KEY_FILE !== undefined) {
 
 // Relay server attaches to the same HTTP server, sharing port
 const relayServer = new RelayServer({ baseUrl: BASE_URL, server: httpServer });
+
+// Metrics collector
+const metrics = new MetricsCollector();
+const STATUS_PASSWORD = process.env.STATUS_PASSWORD;
+
+// Wire relay lifecycle events to metrics
+relayServer.on("client:connected", (uuid: string) => {
+  metrics.registerClient(uuid);
+});
+relayServer.on("client:disconnected", (uuid: string) => {
+  metrics.removeClient(uuid);
+});
 
 // Session store
 const sessions = new SessionStore();
@@ -77,6 +92,8 @@ app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req
 
   const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
 
+  metrics.record(uuid);
+
   relayServer
     .forward(uuid, req.method, hookPath, headers, body)
     .then((response) => {
@@ -97,6 +114,15 @@ app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req
     .catch(() => {
       res.status(504).json({ error: "forwarding failed or timed out" });
     });
+});
+
+// Status dashboard (password-protected)
+app.get("/status", statusAuth(STATUS_PASSWORD), (_req, res) => {
+  res.type("html").send(renderStatusPage(metrics.snapshot()));
+});
+
+app.get("/api/status", statusAuth(STATUS_PASSWORD), (_req, res) => {
+  res.json(buildStatusJson(metrics.snapshot()));
 });
 
 // Health check
