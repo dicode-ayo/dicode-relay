@@ -10,6 +10,7 @@
 
 import { createHash, createVerify } from "node:crypto";
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import type { IncomingMessage } from "node:http";
 import { type Server } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
@@ -88,7 +89,7 @@ export interface RelayServerOptions {
   port?: number;
 }
 
-export class RelayServer {
+export class RelayServer extends EventEmitter {
   private readonly wss: WebSocketServer;
   private readonly nonces = new NonceStore();
   private readonly clients = new Map<string, ConnectedClient>();
@@ -96,6 +97,7 @@ export class RelayServer {
   private readonly baseUrl: string;
 
   constructor(opts: RelayServerOptions) {
+    super();
     this.baseUrl = opts.baseUrl;
 
     if (opts.server !== undefined) {
@@ -237,6 +239,7 @@ export class RelayServer {
         pongTimer = null;
       }
       if (registeredUuid !== null) {
+        this.emit("client:disconnected", registeredUuid);
         this.clients.delete(registeredUuid);
         registeredUuid = null;
       }
@@ -278,6 +281,7 @@ export class RelayServer {
           url: `${this.baseUrl}/u/${hello.uuid}/hooks/`,
         };
         this.sendMessage(ws, welcome);
+        this.emit("client:connected", hello.uuid);
 
         // Start keepalive
         pingTimer = setInterval(() => {
