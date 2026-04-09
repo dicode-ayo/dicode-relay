@@ -72,16 +72,14 @@ app.use(grantMiddleware);
 // Broker router
 app.use(buildBrokerRouter(relayServer, sessions));
 
-// Inbound webhook forwarding: /u/:uuid/hooks/*
+// ---------------------------------------------------------------------------
+// Inbound request forwarding — shared handler
+// ---------------------------------------------------------------------------
 // Accepts any HTTP method. Reads the raw body, forwards via the WebSocket tunnel
 // to the connected daemon, and streams the daemon's response back to the caller.
 // URL rewriting handled daemon-side — see dicode-core feat/transparent-relay-proxy
-app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
-  const uuid = req.params.uuid;
-  const pathParam = req.params.path;
-  const pathStr = Array.isArray(pathParam) ? pathParam.join("/") : pathParam;
-  const hookPath = "/hooks/" + pathStr;
 
+function forwardToClient(req: express.Request, res: express.Response, uuid: string, forwardPath: string): void {
   if (!relayServer.hasClient(uuid)) {
     res.status(502).json({ error: "daemon not connected" });
     return;
@@ -98,7 +96,7 @@ app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req
   metrics.record(uuid);
 
   relayServer
-    .forward(uuid, req.method, hookPath, headers, body)
+    .forward(uuid, req.method, forwardPath, headers, body)
     .then((response) => {
       res.status(response.status);
       for (const [k, vals] of Object.entries(response.headers)) {
@@ -115,6 +113,21 @@ app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req
     .catch(() => {
       res.status(504).json({ error: "forwarding failed or timed out" });
     });
+}
+
+// /u/:uuid/dicode.js — client SDK served by the daemon
+app.get("/u/:uuid/dicode.js", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
+  forwardToClient(req, res, req.params.uuid, "/dicode.js");
+});
+
+// /u/:uuid/hooks/* — webhook requests forwarded to daemon
+app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
+  const uuid = req.params.uuid;
+  const pathParam = req.params.path;
+  const pathStr = Array.isArray(pathParam) ? pathParam.join("/") : pathParam;
+  const hookPath = "/hooks/" + pathStr;
+
+  forwardToClient(req, res, uuid, hookPath);
 });
 
 // Status dashboard (password-protected)
