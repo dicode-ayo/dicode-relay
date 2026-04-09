@@ -4,7 +4,7 @@
  */
 
 import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { RelayServer } from "../../src/relay/server.js";
 import { NonceStore } from "../../src/relay/nonces.js";
@@ -291,5 +291,24 @@ describe("NonceStore", () => {
 
     store.clear();
     expect(store.size).toBe(0);
+  });
+
+  it("nonce expires after TTL (60 s)", () => {
+    vi.useFakeTimers();
+    try {
+      const store = new NonceStore();
+      const nonce = randomBytes(32).toString("hex");
+
+      expect(store.check(nonce)).toBe(false);
+      expect(store.check(nonce)).toBe(true);
+
+      // Advance past 60 s TTL
+      vi.advanceTimersByTime(61_000);
+
+      // Nonce should have been evicted by the timer callback
+      expect(store.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
