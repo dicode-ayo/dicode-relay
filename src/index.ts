@@ -75,10 +75,11 @@ app.use(buildBrokerRouter(relayServer, sessions));
 // Inbound webhook forwarding: /u/:uuid/hooks/*
 // Accepts any HTTP method. Reads the raw body, forwards via the WebSocket tunnel
 // to the connected daemon, and streams the daemon's response back to the caller.
+// URL rewriting handled daemon-side — see dicode-core feat/transparent-relay-proxy
 app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
   const uuid = req.params.uuid;
-  const pathSegments = req.params.path as string | string[];
-  const pathStr = Array.isArray(pathSegments) ? pathSegments.join("/") : pathSegments;
+  const pathParam = req.params.path;
+  const pathStr = Array.isArray(pathParam) ? pathParam.join("/") : pathParam;
   const hookPath = "/hooks/" + pathStr;
 
   if (!relayServer.hasClient(uuid)) {
