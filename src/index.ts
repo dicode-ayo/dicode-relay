@@ -77,8 +77,8 @@ app.use(buildBrokerRouter(relayServer, sessions));
 // to the connected daemon, and streams the daemon's response back to the caller.
 app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
   const uuid = req.params.uuid;
-  const pathParam = req.params.path;
-  const pathStr = Array.isArray(pathParam) ? pathParam.join("/") : (pathParam ?? "");
+  const pathSegments = req.params.path as string | string[];
+  const pathStr = Array.isArray(pathSegments) ? pathSegments.join("/") : pathSegments;
   const hookPath = "/hooks/" + pathStr;
 
   if (!relayServer.hasClient(uuid)) {
@@ -100,14 +100,12 @@ app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req
     .forward(uuid, req.method, hookPath, headers, body)
     .then((response) => {
       res.status(response.status);
-      if (response.headers !== undefined) {
-        for (const [k, vals] of Object.entries(response.headers)) {
-          for (const v of vals) {
-            res.append(k, v);
-          }
+      for (const [k, vals] of Object.entries(response.headers)) {
+        for (const v of vals) {
+          res.append(k, v);
         }
       }
-      if (response.body !== undefined && response.body !== "") {
+      if (response.body !== "") {
         res.send(Buffer.from(response.body, "base64"));
       } else {
         res.end();
