@@ -15,12 +15,13 @@ export function statusAuth(password: string | undefined): RequestHandler {
     }
 
     const match = /^Basic\s+(.+)$/i.exec(authHeader);
-    if (match === null || match[1] === undefined) {
+    const credentials = match?.[1];
+    if (credentials === undefined) {
       res.status(401).json({ error: "invalid auth format" });
       return;
     }
 
-    const decoded = Buffer.from(match[1], "base64").toString("utf8");
+    const decoded = Buffer.from(credentials, "base64").toString("utf8");
     const colonIndex = decoded.indexOf(":");
     const providedPassword = colonIndex === -1 ? decoded : decoded.substring(colonIndex + 1);
 

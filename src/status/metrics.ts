@@ -78,8 +78,10 @@ export class MetricsCollector {
     this.advanceSecondBuckets(entry, nowSec);
     this.advanceHourBuckets(entry, nowHour);
 
-    entry.secondBuckets[entry.secondIndex]!++;
-    entry.hourBuckets[entry.hourIndex]!++;
+    const si = entry.secondIndex;
+    const hi = entry.hourIndex;
+    entry.secondBuckets[si] = (entry.secondBuckets[si] ?? 0) + 1;
+    entry.hourBuckets[hi] = (entry.hourBuckets[hi] ?? 0) + 1;
     entry.totalRequests++;
   }
 
@@ -181,8 +183,8 @@ export class MetricsCollector {
 
 function sumUint32Array(arr: Uint32Array): number {
   let sum = 0;
-  for (let i = 0; i < arr.length; i++) {
-    sum += arr[i] ?? 0;
+  for (const val of arr) {
+    sum += val;
   }
   return sum;
 }
