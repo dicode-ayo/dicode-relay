@@ -79,7 +79,12 @@ app.use(buildBrokerRouter(relayServer, sessions));
 // to the connected daemon, and streams the daemon's response back to the caller.
 // URL rewriting handled daemon-side — see dicode-core feat/transparent-relay-proxy
 
-function forwardToClient(req: express.Request, res: express.Response, uuid: string, forwardPath: string): void {
+function forwardToClient(
+  req: express.Request,
+  res: express.Response,
+  uuid: string,
+  forwardPath: string,
+): void {
   if (!relayServer.hasClient(uuid)) {
     res.status(502).json({ error: "daemon not connected" });
     return;
