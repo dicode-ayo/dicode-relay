@@ -12,7 +12,7 @@
 
 import Database from "better-sqlite3";
 import type { Database as BetterSqliteDatabase, Statement } from "better-sqlite3";
-import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55,6 +55,22 @@ export interface Plan {
   renewsAt: number | null;
 }
 
+/**
+ * Raised by `claimDaemonStrict` when a daemon UUID is already owned by a
+ * different user. The strict variant refuses to silently rebind — callers
+ * (notably #14's claim flow) should surface this as 409 Conflict.
+ */
+export class DaemonAlreadyClaimedError extends Error {
+  readonly uuid: string;
+  readonly ownerUserId: number;
+  constructor(uuid: string, ownerUserId: number) {
+    super(`daemon ${uuid} is already claimed by user ${String(ownerUserId)}`);
+    this.name = "DaemonAlreadyClaimedError";
+    this.uuid = uuid;
+    this.ownerUserId = ownerUserId;
+  }
+}
+
 export interface Db {
   // users
   upsertUserFromGithub(gh: GithubProfile, token?: Buffer): User;
@@ -62,7 +78,18 @@ export interface Db {
 
   // daemons
   getDaemon(uuid: string): DaemonRow | null;
+  /**
+   * Upsert variant — silently rebinds a UUID to a different user. Kept for
+   * backwards compatibility and tests; new callers should prefer
+   * `claimDaemonStrict` unless they explicitly want rebinding semantics.
+   */
   claimDaemon(uuid: string, userId: number, label?: string): void;
+  /**
+   * Strict variant: insert a new row, refresh `last_seen` (and optionally the
+   * label) when the same user re-claims, or throw `DaemonAlreadyClaimedError`
+   * when a different user tries to claim the same UUID.
+   */
+  claimDaemonStrict(uuid: string, userId: number, label?: string): void;
   countActiveDaemonsForUser(userId: number, uuids: Iterable<string>): number;
 
   // plans
@@ -259,7 +286,6 @@ interface Statements {
   listDaemonUuidsForUser: Statement<[number]>;
   getPlan: Statement<[number]>;
   upsertPlan: Statement<[number, Tier, number, number, string, string | null, number | null]>;
-  getHookUsage: Statement<[number, string]>;
   incrementHookUsage: Statement<[number, string]>;
 }
 
@@ -271,11 +297,14 @@ class SqliteDb implements Db {
     this.handle = handle;
     this.stmts = {
       upsertUser: handle.prepare(
+        // NOTE: `email` uses COALESCE so callers that refresh a user on an
+        // OAuth roundtrip without an email scope do not clobber a previously
+        // stored address. Same pattern as the encrypted-token column.
         `INSERT INTO users (github_id, github_login, email, github_access_token_encrypted, created_at)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(github_id) DO UPDATE SET
            github_login = excluded.github_login,
-           email = excluded.email,
+           email = COALESCE(excluded.email, users.email),
            github_access_token_encrypted =
              COALESCE(excluded.github_access_token_encrypted, users.github_access_token_encrypted)`,
       ),
@@ -301,11 +330,14 @@ class SqliteDb implements Db {
            concurrent_daemons = excluded.concurrent_daemons,
            oauth_providers = excluded.oauth_providers`,
       ),
-      getHookUsage: handle.prepare("SELECT count FROM hook_usage WHERE user_id = ? AND period = ?"),
       incrementHookUsage: handle.prepare(
+        // Single atomic upsert-and-read via RETURNING. better-sqlite3 is
+        // synchronous per process and the whole row is produced inside one
+        // SQL statement, so no wrapping transaction is needed.
         `INSERT INTO hook_usage (user_id, period, count)
          VALUES (?, ?, 1)
-         ON CONFLICT(user_id, period) DO UPDATE SET count = hook_usage.count + 1`,
+         ON CONFLICT(user_id, period) DO UPDATE SET count = hook_usage.count + 1
+         RETURNING count`,
       ),
     };
   }
@@ -340,6 +372,23 @@ class SqliteDb implements Db {
     this.stmts.claimDaemon.run(uuid, userId, label ?? null, now, now);
   }
 
+  claimDaemonStrict(uuid: string, userId: number, label?: string): void {
+    const now = Math.floor(Date.now() / 1000);
+    const tx = this.handle.transaction(() => {
+      const existing = this.stmts.getDaemon.get(uuid) as DaemonSqlRow | undefined;
+      if (existing === undefined) {
+        this.stmts.claimDaemon.run(uuid, userId, label ?? null, now, now);
+        return;
+      }
+      if (existing.user_id !== userId) {
+        throw new DaemonAlreadyClaimedError(uuid, existing.user_id);
+      }
+      // Same owner — refresh last_seen and optionally the label.
+      this.stmts.claimDaemon.run(uuid, userId, label ?? existing.label, now, now);
+    });
+    tx();
+  }
+
   countActiveDaemonsForUser(userId: number, uuids: Iterable<string>): number {
     const active = new Set(uuids);
     if (active.size === 0) return 0;
@@ -366,6 +415,10 @@ class SqliteDb implements Db {
     };
   }
 
+  // TODO(#18, #20): setPlan currently wipes stripe_sub_id / renews_at on
+  // every tier change. When billing integration lands, split this into a
+  // tier-only update and a separate billing-aware setter so re-tiering a Pro
+  // user to Team does not drop their Stripe subscription reference.
   setPlan(userId: number, tier: Tier): void {
     const d = PLAN_DEFAULTS[tier];
     this.stmts.upsertPlan.run(
@@ -380,15 +433,11 @@ class SqliteDb implements Db {
   }
 
   incrementHookUsage(userId: number, period: string): number {
-    const tx = this.handle.transaction(() => {
-      this.stmts.incrementHookUsage.run(userId, period);
-      const row = this.stmts.getHookUsage.get(userId, period) as HookUsageRow | undefined;
-      if (row === undefined) {
-        throw new Error("incrementHookUsage: row disappeared after upsert");
-      }
-      return row.count;
-    });
-    return tx();
+    const row = this.stmts.incrementHookUsage.get(userId, period) as HookUsageRow | undefined;
+    if (row === undefined) {
+      throw new Error("incrementHookUsage: RETURNING produced no row");
+    }
+    return row.count;
   }
 
   close(): void {
@@ -413,6 +462,8 @@ export function openDb(options: OpenDbOptions = {}): Db {
   const path = resolveDbPath(options.path);
   mkdirSync(dirname(path), { recursive: true });
 
+  const existedBefore = existsSync(path);
+
   const handle = new Database(path);
   handle.pragma("journal_mode = WAL");
   handle.pragma("foreign_keys = ON");
@@ -422,6 +473,23 @@ export function openDb(options: OpenDbOptions = {}): Db {
   const fk = handle.pragma("foreign_keys") as PragmaForeignKeysRow[];
   if (fk[0]?.foreign_keys !== 1) {
     throw new Error("failed to enable SQLite foreign_keys pragma");
+  }
+
+  // Narrow file permissions to 0600 so other local users cannot read the DB.
+  // The users table will eventually hold encrypted GitHub tokens (#13); even
+  // in their absence, email addresses are PII. Only narrow when the caller is
+  // inheriting defaults: if the file already existed before this call and has
+  // stricter perms set by an operator we don't widen — we only chmod when the
+  // mode has group/other bits.
+  try {
+    const st = statSync(path);
+    const looseBits = st.mode & 0o077;
+    if (!existedBefore || looseBits !== 0) {
+      chmodSync(path, 0o600);
+    }
+  } catch {
+    // stat/chmod can fail on some platforms (e.g. Windows). Not fatal — the
+    // Dockerfile runs as a dedicated user with an exclusive volume anyway.
   }
 
   runMigrations(handle);

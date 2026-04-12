@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
+import { tmpdir, platform } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 
-import { openDb, type Db } from "../../src/db/index.js";
+import { openDb, type Db, DaemonAlreadyClaimedError } from "../../src/db/index.js";
 
 interface Ctx {
   dir: string;
@@ -275,6 +275,120 @@ describe("hook usage", () => {
     expect(sorted[0]).toBe(1);
     expect(sorted[sorted.length - 1]).toBe(N);
     expect(new Set(sorted).size).toBe(N);
+  });
+});
+
+describe("db file permissions", () => {
+  it("sets mode 0600 on a freshly created database file", () => {
+    if (platform() === "win32") return; // POSIX perms don't apply
+    const st = statSync(ctx.dbPath);
+    const looseBits = st.mode & 0o077;
+    expect(looseBits).toBe(0);
+  });
+
+  it("narrows mode to 0600 when opening a loose-permissioned existing file", async () => {
+    if (platform() === "win32") return;
+    // Close, widen, reopen.
+    ctx.db.close();
+    const { chmodSync } = await import("node:fs");
+    chmodSync(ctx.dbPath, 0o644);
+    ctx.db = openDb({ path: ctx.dbPath });
+    const st = statSync(ctx.dbPath);
+    expect(st.mode & 0o077).toBe(0);
+  });
+});
+
+describe("upsertUserFromGithub email preservation", () => {
+  it("preserves existing email when a subsequent call omits it", () => {
+    const a = ctx.db.upsertUserFromGithub({
+      githubId: 100,
+      login: "alice",
+      email: "alice@example.com",
+    });
+    // Second call without email should NOT wipe the stored one.
+    const b = ctx.db.upsertUserFromGithub({ githubId: 100, login: "alice-renamed" });
+    expect(b.id).toBe(a.id);
+    expect(b.githubLogin).toBe("alice-renamed");
+    expect(b.email).toBe("alice@example.com");
+  });
+
+  it("overwrites email when a new non-null value is supplied", () => {
+    ctx.db.upsertUserFromGithub({
+      githubId: 101,
+      login: "alice",
+      email: "old@example.com",
+    });
+    const b = ctx.db.upsertUserFromGithub({
+      githubId: 101,
+      login: "alice",
+      email: "new@example.com",
+    });
+    expect(b.email).toBe("new@example.com");
+  });
+});
+
+describe("claimDaemonStrict", () => {
+  const uuid = "d".repeat(64);
+
+  it("inserts a new row when the uuid is unknown", () => {
+    const u = ctx.db.upsertUserFromGithub({ githubId: 200, login: "alice" });
+    ctx.db.claimDaemonStrict(uuid, u.id, "laptop");
+    const d = ctx.db.getDaemon(uuid);
+    expect(d?.userId).toBe(u.id);
+    expect(d?.label).toBe("laptop");
+  });
+
+  it("refreshes last_seen on re-claim by the same owner", () => {
+    const u = ctx.db.upsertUserFromGithub({ githubId: 201, login: "alice" });
+    ctx.db.claimDaemonStrict(uuid, u.id, "laptop");
+    const before = ctx.db.getDaemon(uuid)?.lastSeen ?? 0;
+    ctx.db.claimDaemonStrict(uuid, u.id);
+    const after = ctx.db.getDaemon(uuid)?.lastSeen ?? 0;
+    expect(after).toBeGreaterThanOrEqual(before);
+  });
+
+  it("preserves the original label when re-claim omits one", () => {
+    const u = ctx.db.upsertUserFromGithub({ githubId: 202, login: "alice" });
+    ctx.db.claimDaemonStrict(uuid, u.id, "laptop");
+    ctx.db.claimDaemonStrict(uuid, u.id);
+    expect(ctx.db.getDaemon(uuid)?.label).toBe("laptop");
+  });
+
+  it("updates the label when re-claim supplies a new one", () => {
+    const u = ctx.db.upsertUserFromGithub({ githubId: 203, login: "alice" });
+    ctx.db.claimDaemonStrict(uuid, u.id, "laptop");
+    ctx.db.claimDaemonStrict(uuid, u.id, "desktop");
+    expect(ctx.db.getDaemon(uuid)?.label).toBe("desktop");
+  });
+
+  it("throws DaemonAlreadyClaimedError when a different user tries to claim", () => {
+    const a = ctx.db.upsertUserFromGithub({ githubId: 204, login: "alice" });
+    const b = ctx.db.upsertUserFromGithub({ githubId: 205, login: "bob" });
+    ctx.db.claimDaemonStrict(uuid, a.id, "alice-laptop");
+
+    expect(() => {
+      ctx.db.claimDaemonStrict(uuid, b.id, "bob-laptop");
+    }).toThrowError(DaemonAlreadyClaimedError);
+
+    // Original binding and label must be untouched.
+    const d = ctx.db.getDaemon(uuid);
+    expect(d?.userId).toBe(a.id);
+    expect(d?.label).toBe("alice-laptop");
+  });
+
+  it("DaemonAlreadyClaimedError carries the conflicting uuid and owner", () => {
+    const a = ctx.db.upsertUserFromGithub({ githubId: 206, login: "alice" });
+    const b = ctx.db.upsertUserFromGithub({ githubId: 207, login: "bob" });
+    ctx.db.claimDaemonStrict(uuid, a.id);
+    try {
+      ctx.db.claimDaemonStrict(uuid, b.id);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DaemonAlreadyClaimedError);
+      const e = err as DaemonAlreadyClaimedError;
+      expect(e.uuid).toBe(uuid);
+      expect(e.ownerUserId).toBe(a.id);
+    }
   });
 });
 
