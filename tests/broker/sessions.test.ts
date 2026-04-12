@@ -3,7 +3,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SessionStore } from "../../src/broker/sessions.js";
 import type { Session } from "../../src/broker/sessions.js";
 
@@ -91,5 +91,25 @@ describe("SessionStore", () => {
     store.set(session);
     expect(store.get("scoped")?.scope).toBe("repo user");
     store.clear();
+  });
+
+  it("session expires after TTL (5 min)", () => {
+    vi.useFakeTimers();
+    try {
+      const store = new SessionStore();
+      const session = makeSession("ttl-test");
+
+      store.set(session);
+      expect(store.size).toBe(1);
+
+      // Advance past 5 min TTL
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1000);
+
+      // Session should have been evicted by the timer callback
+      expect(store.size).toBe(0);
+      expect(store.get("ttl-test")).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
