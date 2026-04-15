@@ -180,7 +180,7 @@ describe("ECIES round-trip", () => {
     const tokens = { access_token: "tok_abc123", token_type: "Bearer" };
     const plaintext = Buffer.from(JSON.stringify(tokens));
 
-    const payload = await eciesEncrypt(daemonPubkeyBytes, sessionId, plaintext);
+    const payload = await eciesEncrypt(daemonPubkeyBytes, sessionId, "oauth_token_delivery", plaintext);
 
     expect(payload.ephemeralPubkey).toBeTruthy();
     expect(payload.ciphertext).toBeTruthy();
@@ -190,7 +190,7 @@ describe("ECIES round-trip", () => {
     expect(Buffer.from(payload.nonce, "base64").length).toBe(12);
 
     // Decrypt using daemon private key
-    const decrypted = await eciesDecrypt(daemonECDH, sessionId, payload);
+    const decrypted = await eciesDecrypt(daemonECDH, sessionId, "oauth_token_delivery", payload);
 
     expect(decrypted.toString()).toBe(JSON.stringify(tokens));
   });
@@ -203,7 +203,7 @@ describe("ECIES round-trip", () => {
     const sessionId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const plaintext = Buffer.from("hello world");
 
-    const payload = await eciesEncrypt(daemonPubkeyBytes, sessionId, plaintext);
+    const payload = await eciesEncrypt(daemonPubkeyBytes, sessionId, "oauth_token_delivery", plaintext);
 
     // Ciphertext should be: len(plaintext) + 16 bytes (auth tag)
     const ctBytes = Buffer.from(payload.ciphertext, "base64");
@@ -216,11 +216,11 @@ describe("ECIES round-trip", () => {
     const daemonPubkeyBytes = daemonECDH.getPublicKey();
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
-    const payload = await eciesEncrypt(daemonPubkeyBytes, sessionId, Buffer.from("secret data"));
+    const payload = await eciesEncrypt(daemonPubkeyBytes, sessionId, "oauth_token_delivery", Buffer.from("secret data"));
 
     // Decrypt with wrong session ID → different key → GCM auth tag fails
     await expect(
-      eciesDecrypt(daemonECDH, "00000000-0000-0000-0000-000000000000", payload),
+      eciesDecrypt(daemonECDH, "00000000-0000-0000-0000-000000000000", "oauth_token_delivery", payload),
     ).rejects.toThrow();
   });
 
@@ -230,13 +230,13 @@ describe("ECIES round-trip", () => {
     const daemonPubkeyBytes = daemonECDH.getPublicKey();
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
-    const payload = await eciesEncrypt(daemonPubkeyBytes, sessionId, Buffer.from("secret"));
+    const payload = await eciesEncrypt(daemonPubkeyBytes, sessionId, "oauth_token_delivery", Buffer.from("secret"));
 
     // Try to decrypt with a different ECDH key
     const wrongECDH = createECDH("prime256v1");
     wrongECDH.generateKeys();
 
-    await expect(eciesDecrypt(wrongECDH, sessionId, payload)).rejects.toThrow();
+    await expect(eciesDecrypt(wrongECDH, sessionId, "oauth_token_delivery", payload)).rejects.toThrow();
   });
 
   it("each encryption produces different ciphertext (random nonce)", async () => {
@@ -247,12 +247,41 @@ describe("ECIES round-trip", () => {
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
     const plaintext = Buffer.from("same message");
 
-    const p1 = await eciesEncrypt(daemonPubkeyBytes, sessionId, plaintext);
-    const p2 = await eciesEncrypt(daemonPubkeyBytes, sessionId, plaintext);
+    const p1 = await eciesEncrypt(daemonPubkeyBytes, sessionId, "oauth_token_delivery", plaintext);
+    const p2 = await eciesEncrypt(daemonPubkeyBytes, sessionId, "oauth_token_delivery", plaintext);
 
     // Nonces should differ
     expect(p1.nonce).not.toBe(p2.nonce);
     // Ciphertexts should differ (different ephemeral keys + nonces)
     expect(p1.ciphertext).not.toBe(p2.ciphertext);
+  });
+
+  it("decryption fails with wrong message type (AAD domain separation)", async () => {
+    const daemonECDH = createECDH("prime256v1");
+    daemonECDH.generateKeys();
+    const daemonPubkeyBytes = daemonECDH.getPublicKey();
+
+    const sessionId = "550e8400-e29b-41d4-a716-446655440000";
+    const payload = await eciesEncrypt(
+      daemonPubkeyBytes,
+      sessionId,
+      "oauth_token_delivery",
+      Buffer.from("t"),
+    );
+
+    // Decrypting with any other type label must fail.
+    await expect(
+      eciesDecrypt(daemonECDH, sessionId, "some_future_message", payload),
+    ).rejects.toThrow();
+  });
+
+  it("encryption rejects empty message type", async () => {
+    const daemonECDH = createECDH("prime256v1");
+    daemonECDH.generateKeys();
+    const daemonPubkeyBytes = daemonECDH.getPublicKey();
+
+    await expect(
+      eciesEncrypt(daemonPubkeyBytes, "s", "", Buffer.from("t")),
+    ).rejects.toThrow(/messageType is required/);
   });
 });

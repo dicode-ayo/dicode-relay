@@ -197,18 +197,21 @@ async function handleCallback(
     Object.entries(rawTokenData).filter(([k]) => k !== "state"),
   );
 
-  // Encrypt the token payload with ECIES for the daemon
+  // Encrypt the token payload with ECIES for the daemon. The message type
+  // is bound into GCM's authenticated data so the daemon can never decrypt
+  // this envelope under a different type label — see crypto.ts.
+  const deliveryType = "oauth_token_delivery";
   const plaintext = Buffer.from(JSON.stringify(tokensToDeliver));
   let encrypted: Awaited<ReturnType<typeof eciesEncrypt>>;
   try {
-    encrypted = await eciesEncrypt(session.pubkey, session.sessionId, plaintext);
+    encrypted = await eciesEncrypt(session.pubkey, session.sessionId, deliveryType, plaintext);
   } catch {
     res.status(500).send("<html><body><p>Encryption failed</p></body></html>");
     return;
   }
 
   const deliveryPayload: OAuthTokenDeliveryPayload = {
-    type: "oauth_token_delivery",
+    type: deliveryType,
     session_id: session.sessionId,
     ephemeral_pubkey: encrypted.ephemeralPubkey,
     ciphertext: encrypted.ciphertext,

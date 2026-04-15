@@ -118,14 +118,22 @@ export interface EciesPayload {
  *   1. Generate ephemeral P-256 keypair
  *   2. ECDH(ephemeral_priv, daemon_pub) → shared_secret
  *   3. HKDF-SHA256(shared_secret, salt=session_id, info="dicode-oauth-token") → 32-byte enc_key
- *   4. AES-256-GCM encrypt with random 12-byte nonce
+ *   4. AES-256-GCM encrypt with random 12-byte nonce, binding `messageType`
+ *      into the GCM authenticated data so the envelope's Type field cannot
+ *      be swapped for a different message type without invalidating the
+ *      auth tag. This is domain separation: the same key is never asked
+ *      to decrypt two semantically distinct wire formats cleanly.
  *   5. Append 16-byte auth tag to ciphertext
  */
 export async function eciesEncrypt(
   daemonPubkeyBytes: Buffer,
   sessionId: string,
+  messageType: string,
   plaintext: Buffer,
 ): Promise<EciesPayload> {
+  if (!messageType) {
+    throw new Error("eciesEncrypt: messageType is required (domain separation)");
+  }
   const eph = createECDH("prime256v1");
   eph.generateKeys();
 
@@ -144,6 +152,7 @@ export async function eciesEncrypt(
 
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encKey, iv);
+  cipher.setAAD(Buffer.from(messageType, "utf8"));
   const ctWithoutTag = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const authTag = cipher.getAuthTag(); // 16 bytes
 
@@ -172,8 +181,12 @@ export async function eciesEncrypt(
 export async function eciesDecrypt(
   daemonECDH: ReturnType<typeof createECDH>,
   sessionId: string,
+  messageType: string,
   payload: EciesPayload,
 ): Promise<Buffer> {
+  if (!messageType) {
+    throw new Error("eciesDecrypt: messageType is required (domain separation)");
+  }
   const ephPubBytes = Buffer.from(payload.ephemeralPubkey, "base64");
   const sharedSecret = daemonECDH.computeSecret(ephPubBytes);
 
@@ -194,6 +207,7 @@ export async function eciesDecrypt(
   const authTag = ciphertextWithTag.subarray(ciphertextWithTag.length - 16);
 
   const decipher = createDecipheriv("aes-256-gcm", encKey, iv);
+  decipher.setAAD(Buffer.from(messageType, "utf8"));
   decipher.setAuthTag(authTag);
 
   return Buffer.concat([decipher.update(ct), decipher.final()]);
