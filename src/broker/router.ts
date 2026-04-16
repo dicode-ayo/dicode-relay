@@ -140,6 +140,12 @@ export function buildBrokerRouter(
     const redirectPath =
       `/connect/${provider}?state=${encodeURIComponent(session)}` +
       (scope !== undefined && scope !== "" ? `&scope=${encodeURIComponent(scope)}` : "");
+    // Suppress Referer on the redirect so the upstream provider's consent
+    // page does not receive the session_id, sig, or challenge in its access
+    // logs. Without this, browsers forward the full /auth/:provider?… URL
+    // as the Referer header on the navigation to the provider's authorize
+    // endpoint.
+    res.setHeader("Referrer-Policy", "no-referrer");
     res.redirect(302, redirectPath);
   });
 
