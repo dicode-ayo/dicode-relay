@@ -6,7 +6,6 @@
  * TTL: 5 minutes. Sessions that have not been completed by then are purged.
  */
 
-
 export interface Session {
   /** UUID v4 of the broker session */
   sessionId: string;

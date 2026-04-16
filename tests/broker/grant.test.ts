@@ -17,17 +17,24 @@ describe("buildGrantMiddleware", () => {
   });
 
   it("includes providers with clientId set", () => {
-    const providers = makeProviders(
-      { grantKey: "github", clientId: "gh_id", clientSecret: "gh_secret", pkce: true, scopes: ["user", "repo"] },
-    );
+    const providers = makeProviders({
+      grantKey: "github",
+      clientId: "gh_id",
+      clientSecret: "gh_secret",
+      pkce: true,
+      scopes: ["user", "repo"],
+    });
     const middleware = buildGrantMiddleware(providers, "https://relay.dicode.app");
     expect(typeof middleware).toBe("function");
   });
 
   it("handles PKCE-only providers (no secret)", () => {
-    const providers = makeProviders(
-      { grantKey: "slack", clientId: "slack_id", pkce: true, scopes: ["channels:read"] },
-    );
+    const providers = makeProviders({
+      grantKey: "slack",
+      clientId: "slack_id",
+      pkce: true,
+      scopes: ["channels:read"],
+    });
     const middleware = buildGrantMiddleware(providers, "https://relay.dicode.app");
     expect(typeof middleware).toBe("function");
   });
@@ -38,9 +45,13 @@ describe("buildGrantMiddleware", () => {
   });
 
   it("uses baseUrl as origin", () => {
-    const providers = makeProviders(
-      { grantKey: "github", clientId: "id", clientSecret: "secret", pkce: true, scopes: [] },
-    );
+    const providers = makeProviders({
+      grantKey: "github",
+      clientId: "id",
+      clientSecret: "secret",
+      pkce: true,
+      scopes: [],
+    });
     const middleware = buildGrantMiddleware(providers, "https://custom.example.com");
     expect(typeof middleware).toBe("function");
   });

@@ -17,7 +17,10 @@ import { testSessionTtlMs, testRelayOpts } from "../helpers.js";
 /** Test provider map with a single "github" provider. */
 function testProviders(): ReadonlyMap<string, ProviderConfig> {
   return new Map([
-    ["github", { grantKey: "github", clientId: "test-client-id", pkce: true, scopes: ["user", "repo"] }],
+    [
+      "github",
+      { grantKey: "github", clientId: "test-client-id", pkce: true, scopes: ["user", "repo"] },
+    ],
   ]);
 }
 
