@@ -21,7 +21,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@iconify-icons/logos": "^1.2.36",
     "express": "^5.0.1",
     "grant": "^5.4.22",
     "js-yaml": "^4.1.1",

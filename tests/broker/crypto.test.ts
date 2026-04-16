@@ -271,8 +271,26 @@ describe("ECIES round-trip", () => {
 
     // Decrypting with any other type label must fail.
     await expect(
-      eciesDecrypt(daemonECDH, sessionId, "some_future_message", payload),
+      eciesDecrypt(daemonECDH, sessionId, "some_future_message" as never, payload),
     ).rejects.toThrow();
+  });
+
+  it("decryption rejects empty message type", async () => {
+    const daemonECDH = createECDH("prime256v1");
+    daemonECDH.generateKeys();
+    const daemonPubkeyBytes = daemonECDH.getPublicKey();
+
+    const sessionId = "550e8400-e29b-41d4-a716-446655440000";
+    const payload = await eciesEncrypt(
+      daemonPubkeyBytes,
+      sessionId,
+      "oauth_token_delivery",
+      Buffer.from("t"),
+    );
+
+    await expect(
+      eciesDecrypt(daemonECDH, sessionId, "" as never, payload),
+    ).rejects.toThrow(/messageType is required/);
   });
 
   it("encryption rejects empty message type", async () => {
@@ -281,7 +299,7 @@ describe("ECIES round-trip", () => {
     const daemonPubkeyBytes = daemonECDH.getPublicKey();
 
     await expect(
-      eciesEncrypt(daemonPubkeyBytes, "s", "", Buffer.from("t")),
+      eciesEncrypt(daemonPubkeyBytes, "s", "" as never, Buffer.from("t")),
     ).rejects.toThrow(/messageType is required/);
   });
 });

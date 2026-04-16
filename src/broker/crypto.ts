@@ -26,6 +26,16 @@ import { promisify } from "node:util";
 const hkdfAsync = promisify(hkdf);
 
 // ---------------------------------------------------------------------------
+// ECIES message type — ASCII-only by contract so that both
+// Buffer.from(type, "utf8") (TS) and []byte(type) (Go) produce
+// identical AAD bytes. A new envelope version must be introduced as a
+// new union member, not as a silent wire-format bump under the same label.
+// ---------------------------------------------------------------------------
+
+/** Discriminated type labels for ECIES-encrypted message envelopes. */
+export type EciesMessageType = "oauth_token_delivery";
+
+// ---------------------------------------------------------------------------
 // buildSignedPayload
 // ---------------------------------------------------------------------------
 
@@ -128,7 +138,7 @@ export interface EciesPayload {
 export async function eciesEncrypt(
   daemonPubkeyBytes: Buffer,
   sessionId: string,
-  messageType: string,
+  messageType: EciesMessageType,
   plaintext: Buffer,
 ): Promise<EciesPayload> {
   if (!messageType) {
@@ -174,14 +184,15 @@ export async function eciesEncrypt(
  * Decrypt an ECIES payload using the daemon's private key.
  * This mirrors what the Go daemon does on receipt of an oauth_token_delivery message.
  *
- * @param daemonPrivKeyPem PEM-encoded PKCS#8 private key
- * @param sessionId        Must match the salt used during encryption
- * @param payload          The EciesPayload from eciesEncrypt
+ * @param daemonECDH   ECDH instance holding the daemon's private key (prime256v1)
+ * @param sessionId    Must match the salt used during encryption
+ * @param messageType  Domain-separation label bound into GCM AAD (must match encrypt)
+ * @param payload      The EciesPayload from eciesEncrypt
  */
 export async function eciesDecrypt(
   daemonECDH: ReturnType<typeof createECDH>,
   sessionId: string,
-  messageType: string,
+  messageType: EciesMessageType,
   payload: EciesPayload,
 ): Promise<Buffer> {
   if (!messageType) {
