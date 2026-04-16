@@ -12,6 +12,7 @@ import { buildSignedPayload } from "../../src/broker/crypto.js";
 import type { ProviderConfig } from "../../src/broker/providers.js";
 import { SessionStore } from "../../src/broker/sessions.js";
 import { RelayServer } from "../../src/relay/server.js";
+import { testSessionTtlMs, testRelayOpts } from "../helpers.js";
 
 /** Test provider map with a single "github" provider. */
 function testProviders(): ReadonlyMap<string, ProviderConfig> {
@@ -114,8 +115,8 @@ describe("Broker /auth/:provider", () => {
   let sessions: SessionStore;
 
   beforeEach(async () => {
-    relayServer = new RelayServer({ baseUrl: "wss://relay.dicode.app" });
-    sessions = new SessionStore();
+    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
+    sessions = new SessionStore(testSessionTtlMs);
 
     const app = express();
     app.use(buildBrokerRouter(relayServer, sessions, testProviders()));
@@ -347,8 +348,8 @@ describe("Broker /callback/:provider", () => {
   let sessions: SessionStore;
 
   beforeEach(async () => {
-    relayServer = new RelayServer({ baseUrl: "wss://relay.dicode.app" });
-    sessions = new SessionStore();
+    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
+    sessions = new SessionStore(testSessionTtlMs);
 
     const app = express();
     app.use(buildBrokerRouter(relayServer, sessions, testProviders()));

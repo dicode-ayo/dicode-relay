@@ -84,6 +84,12 @@ const ConfigSchema = z.object({
 export type RelayConfig = z.infer<typeof ConfigSchema>;
 export type ProviderEntry = z.infer<typeof ProviderSchema>;
 
+/** Parse an empty object through the schema to get all Zod defaults.
+ *  Use in tests instead of duplicating default values. */
+export function defaultConfig(): RelayConfig {
+  return ConfigSchema.parse({});
+}
+
 // ---------------------------------------------------------------------------
 // Config loading
 // ---------------------------------------------------------------------------

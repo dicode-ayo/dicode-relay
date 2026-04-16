@@ -11,6 +11,7 @@ import {
   RelayServer,
 } from "../../src/relay/server.js";
 import type { RequestMessage, ResponseMessage } from "../../src/relay/protocol.js";
+import { testRelayOpts } from "../helpers.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -118,7 +119,7 @@ describe("Relay forwarding", () => {
   let port: number;
 
   beforeEach(() => {
-    server = new RelayServer({ baseUrl: "wss://relay.dicode.app" });
+    server = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
     port = server.port;
   });
 
@@ -220,7 +221,7 @@ describe("Relay forwarding", () => {
 
   it("server.close() rejects pending forward promises", async () => {
     // Create a separate server instance so closing it does not interfere with afterEach
-    const tempServer = new RelayServer({ baseUrl: "wss://test.local" });
+    const tempServer = new RelayServer(testRelayOpts({ baseUrl: "wss://test.local" }));
     const { uuid } = await performHandshake(tempServer.port);
 
     // Don't handle messages — let it hang

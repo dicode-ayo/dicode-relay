@@ -12,8 +12,7 @@ export class NonceStore {
   private readonly store = new Map<string, NonceEntry>();
   private readonly ttlMs: number;
 
-  /** @param ttlMs defaults live in the Zod config schema (config.ts) */
-  constructor(ttlMs = 60_000) {
+  constructor(ttlMs: number) {
     this.ttlMs = ttlMs;
   }
 

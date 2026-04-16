@@ -78,17 +78,17 @@ export interface RelayServerOptions {
   server?: Server;
   /** Port to listen on when no server is provided */
   port?: number;
-  /** Tuning — all optional, defaults to protocol spec values */
-  timestampToleranceS?: number;
-  pingIntervalMs?: number;
-  pongTimeoutMs?: number;
-  requestTimeoutMs?: number;
-  nonceTtlMs?: number;
+  /** All tuning values — sourced from the Zod config schema (config.ts) */
+  timestampToleranceS: number;
+  pingIntervalMs: number;
+  pongTimeoutMs: number;
+  requestTimeoutMs: number;
+  nonceTtlMs: number;
 }
 
 export class RelayServer extends EventEmitter {
   private readonly wss: WebSocketServer;
-  private readonly nonces = new NonceStore();
+  private readonly nonces: NonceStore;
   private readonly clients = new Map<string, ConnectedClient>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly baseUrl: string;
@@ -100,14 +100,11 @@ export class RelayServer extends EventEmitter {
   constructor(opts: RelayServerOptions) {
     super();
     this.baseUrl = opts.baseUrl;
-    // Fallbacks match the Zod schema defaults in config.ts — used only in tests.
-    this.timestampToleranceS = opts.timestampToleranceS ?? 30;
-    this.pingIntervalMs = opts.pingIntervalMs ?? 30_000;
-    this.pongTimeoutMs = opts.pongTimeoutMs ?? 10_000;
-    this.requestTimeoutMs = opts.requestTimeoutMs ?? 30_000;
-    if (opts.nonceTtlMs !== undefined) {
-      this.nonces = new NonceStore(opts.nonceTtlMs);
-    }
+    this.nonces = new NonceStore(opts.nonceTtlMs);
+    this.timestampToleranceS = opts.timestampToleranceS;
+    this.pingIntervalMs = opts.pingIntervalMs;
+    this.pongTimeoutMs = opts.pongTimeoutMs;
+    this.requestTimeoutMs = opts.requestTimeoutMs;
 
     if (opts.server !== undefined) {
       this.wss = new WebSocketServer({ server: opts.server });

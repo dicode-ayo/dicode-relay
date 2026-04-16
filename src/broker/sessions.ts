@@ -29,8 +29,7 @@ export class SessionStore {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly ttlMs: number;
 
-  /** @param ttlMs defaults live in the Zod config schema (config.ts) */
-  constructor(ttlMs = 300_000) {
+  constructor(ttlMs: number) {
     this.ttlMs = ttlMs;
   }
 
