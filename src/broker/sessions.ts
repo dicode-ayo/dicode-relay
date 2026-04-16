@@ -6,7 +6,6 @@
  * TTL: 5 minutes. Sessions that have not been completed by then are purged.
  */
 
-const DEFAULT_SESSION_TTL_MS = 5 * 60 * 1000;
 
 export interface Session {
   /** UUID v4 of the broker session */
@@ -30,7 +29,8 @@ export class SessionStore {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly ttlMs: number;
 
-  constructor(ttlMs: number = DEFAULT_SESSION_TTL_MS) {
+  /** @param ttlMs defaults live in the Zod config schema (config.ts) */
+  constructor(ttlMs = 300_000) {
     this.ttlMs = ttlMs;
   }
 

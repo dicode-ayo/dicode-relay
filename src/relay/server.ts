@@ -100,6 +100,7 @@ export class RelayServer extends EventEmitter {
   constructor(opts: RelayServerOptions) {
     super();
     this.baseUrl = opts.baseUrl;
+    // Fallbacks match the Zod schema defaults in config.ts — used only in tests.
     this.timestampToleranceS = opts.timestampToleranceS ?? 30;
     this.pingIntervalMs = opts.pingIntervalMs ?? 30_000;
     this.pongTimeoutMs = opts.pongTimeoutMs ?? 10_000;

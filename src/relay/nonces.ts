@@ -3,8 +3,6 @@
  * O(1) lookup and insertion. Entries are evicted after their TTL expires.
  */
 
-const DEFAULT_NONCE_TTL_MS = 60_000;
-
 interface NonceEntry {
   expiresAt: number;
   timer: ReturnType<typeof setTimeout>;
@@ -14,7 +12,8 @@ export class NonceStore {
   private readonly store = new Map<string, NonceEntry>();
   private readonly ttlMs: number;
 
-  constructor(ttlMs: number = DEFAULT_NONCE_TTL_MS) {
+  /** @param ttlMs defaults live in the Zod config schema (config.ts) */
+  constructor(ttlMs = 60_000) {
     this.ttlMs = ttlMs;
   }
 
