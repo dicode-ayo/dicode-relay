@@ -17,20 +17,23 @@ import { buildSignedPayload, eciesEncrypt, verifyECDSA } from "./crypto.js";
 import type { ProviderConfig } from "./providers.js";
 import type { SessionStore } from "./sessions.js";
 import type { OAuthTokenDeliveryPayload } from "../relay/protocol.js";
+import { buildDeliverySignaturePayload, type BrokerSigningKey } from "./signing.js";
 
 const TIMESTAMP_TOLERANCE_S = 30;
 
 /**
  * Build the Express router for the OAuth broker.
  *
- * @param relay     RelayServer instance — used to look up clients and forward tokens
- * @param sessions  SessionStore instance
- * @param providers Enabled provider map (from config, already resolved)
+ * @param relay      RelayServer instance
+ * @param sessions   SessionStore instance
+ * @param providers  Enabled provider map (from config, already resolved)
+ * @param brokerKey  Broker's signing key (signs delivery envelopes for authenticity)
  */
 export function buildBrokerRouter(
   relay: RelayServer,
   sessions: SessionStore,
   providers: ReadonlyMap<string, ProviderConfig>,
+  brokerKey?: BrokerSigningKey,
 ): Router {
   const router = Router();
 
@@ -161,7 +164,7 @@ export function buildBrokerRouter(
     // The actual Grant callback is handled by Grant middleware before this route,
     // which populates req.session or passes via query. With transport: 'querystring',
     // Grant redirects to this callback URL with the token as query params.
-    void handleCallback(req, res, relay, sessions);
+    void handleCallback(req, res, relay, sessions, brokerKey);
   });
 
   return router;
@@ -172,6 +175,7 @@ async function handleCallback(
   res: Response,
   relay: RelayServer,
   sessions: SessionStore,
+  brokerKey?: BrokerSigningKey,
 ): Promise<void> {
   const rawQuery = req.query as Record<string, string | string[] | undefined>;
   const state = Array.isArray(rawQuery.state) ? rawQuery.state[0] : rawQuery.state;
@@ -223,6 +227,19 @@ async function handleCallback(
     ciphertext: encrypted.ciphertext,
     nonce: encrypted.nonce,
   };
+
+  // Sign the envelope so the daemon can verify it was assembled by this
+  // broker, not by a forger who merely knows the daemon's public key.
+  if (brokerKey !== undefined) {
+    const sigPayload = buildDeliverySignaturePayload(
+      deliveryPayload.type,
+      deliveryPayload.session_id,
+      deliveryPayload.ephemeral_pubkey,
+      deliveryPayload.ciphertext,
+      deliveryPayload.nonce,
+    );
+    deliveryPayload.broker_sig = brokerKey.sign(sigPayload);
+  }
 
   // Delete session immediately (single-use)
   sessions.delete(session.sessionId);
