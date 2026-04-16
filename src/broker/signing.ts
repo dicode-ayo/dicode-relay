@@ -13,7 +13,7 @@
  * message so they can verify delivery signatures.
  */
 
-import { createSign, createVerify, generateKeyPairSync } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, createSign, createVerify, generateKeyPairSync } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -77,7 +77,6 @@ export function loadBrokerSigningKey(
 }
 
 function loadKeyPair(pem: string) {
-  const { createPrivateKey, createPublicKey } = require("node:crypto") as typeof import("node:crypto");
   const privateKey = createPrivateKey(pem);
   const publicKey = createPublicKey(privateKey);
   return { privateKey, publicKey };
@@ -100,7 +99,6 @@ export function buildDeliverySignaturePayload(
   ciphertext: string,
   nonce: string,
 ): Buffer {
-  const { createHash } = require("node:crypto") as typeof import("node:crypto");
   return createHash("sha256")
     .update(type)
     .update(sessionId)

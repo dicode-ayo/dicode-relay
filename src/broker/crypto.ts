@@ -141,9 +141,7 @@ export async function eciesEncrypt(
   messageType: EciesMessageType,
   plaintext: Buffer,
 ): Promise<EciesPayload> {
-  if (!messageType) {
-    throw new Error("eciesEncrypt: messageType is required (domain separation)");
-  }
+  // messageType is type-enforced via EciesMessageType union — always truthy.
   const eph = createECDH("prime256v1");
   eph.generateKeys();
 
@@ -195,9 +193,6 @@ export async function eciesDecrypt(
   messageType: EciesMessageType,
   payload: EciesPayload,
 ): Promise<Buffer> {
-  if (!messageType) {
-    throw new Error("eciesDecrypt: messageType is required (domain separation)");
-  }
   const ephPubBytes = Buffer.from(payload.ephemeralPubkey, "base64");
   const sharedSecret = daemonECDH.computeSecret(ephPubBytes);
 
