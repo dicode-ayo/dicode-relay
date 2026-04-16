@@ -13,7 +13,14 @@
  * message so they can verify delivery signatures.
  */
 
-import { createHash, createPrivateKey, createPublicKey, createSign, createVerify, generateKeyPairSync } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  createSign,
+  createVerify,
+  generateKeyPairSync,
+} from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -122,8 +129,17 @@ export function verifyDeliverySignature(
   nonce: string,
 ): boolean {
   const pubKeyDer = Buffer.from(publicKeyBase64, "base64");
-  const payload = buildDeliverySignaturePayload(type, sessionId, ephemeralPubkey, ciphertext, nonce);
+  const payload = buildDeliverySignaturePayload(
+    type,
+    sessionId,
+    ephemeralPubkey,
+    ciphertext,
+    nonce,
+  );
   const verifier = createVerify("SHA256");
   verifier.update(payload);
-  return verifier.verify({ key: pubKeyDer, format: "der", type: "spki" }, Buffer.from(sig, "base64"));
+  return verifier.verify(
+    { key: pubKeyDer, format: "der", type: "spki" },
+    Buffer.from(sig, "base64"),
+  );
 }
