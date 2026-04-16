@@ -107,82 +107,20 @@ function resolveConfigPath(): string {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
   const configPath = resolveConfigPath();
 
-  if (existsSync(configPath)) {
-    const raw = readFileSync(configPath, "utf8");
-    const parsed = yamlLoad(raw) as Record<string, unknown> | null;
-    const resolved = resolveDeep(parsed ?? {}, env);
-    const config = ConfigSchema.parse(resolved);
-    // Derive base_url from port if not set
-    if (config.server.base_url === "") {
-      config.server.base_url = `http://localhost:${String(config.server.port)}`;
-    }
-    return config;
+  if (!existsSync(configPath)) {
+    throw new Error(
+      `Config file not found: ${configPath}\n` +
+        `Copy relay.yaml.example to relay.yaml and configure it for your environment.`,
+    );
   }
 
-  // Fallback: build config from legacy env vars
-  return buildLegacyConfig(env);
-}
-
-// ---------------------------------------------------------------------------
-// Legacy env var fallback
-// ---------------------------------------------------------------------------
-
-interface LegacyProvider {
-  clientIdEnv: string;
-  secretEnv: string | null;
-  pkce: boolean;
-  scopes: string[];
-}
-
-const LEGACY_PROVIDERS: Record<string, LegacyProvider> = {
-  github:     { clientIdEnv: "GITHUB_CLIENT_ID",     secretEnv: "GITHUB_CLIENT_SECRET",     pkce: true,  scopes: ["user", "repo"] },
-  slack:      { clientIdEnv: "SLACK_CLIENT_ID",       secretEnv: null,                        pkce: true,  scopes: ["channels:read"] },
-  google:     { clientIdEnv: "GOOGLE_CLIENT_ID",      secretEnv: "GOOGLE_CLIENT_SECRET",      pkce: true,  scopes: ["https://www.googleapis.com/auth/userinfo.email"] },
-  spotify:    { clientIdEnv: "SPOTIFY_CLIENT_ID",     secretEnv: null,                        pkce: true,  scopes: ["user-read-private", "user-read-email"] },
-  linear:     { clientIdEnv: "LINEAR_CLIENT_ID",      secretEnv: null,                        pkce: true,  scopes: ["read"] },
-  discord:    { clientIdEnv: "DISCORD_CLIENT_ID",     secretEnv: null,                        pkce: true,  scopes: ["identify", "email"] },
-  gitlab:     { clientIdEnv: "GITLAB_CLIENT_ID",      secretEnv: "GITLAB_CLIENT_SECRET",      pkce: true,  scopes: ["read_user", "read_api"] },
-  airtable:   { clientIdEnv: "AIRTABLE_CLIENT_ID",    secretEnv: "AIRTABLE_CLIENT_SECRET",    pkce: true,  scopes: ["data.records:read"] },
-  notion:     { clientIdEnv: "NOTION_CLIENT_ID",      secretEnv: "NOTION_CLIENT_SECRET",      pkce: false, scopes: [] },
-  confluence: { clientIdEnv: "CONFLUENCE_CLIENT_ID",   secretEnv: null,                        pkce: true,  scopes: ["read:me", "read:confluence-content.all", "offline_access"] },
-  salesforce: { clientIdEnv: "SALESFORCE_CLIENT_ID",   secretEnv: null,                        pkce: true,  scopes: ["api", "refresh_token"] },
-  stripe:     { clientIdEnv: "STRIPE_CLIENT_ID",       secretEnv: "STRIPE_CLIENT_SECRET",      pkce: false, scopes: ["read_write"] },
-  office365:  { clientIdEnv: "OFFICE365_CLIENT_ID",    secretEnv: "OFFICE365_CLIENT_SECRET",   pkce: true,  scopes: ["offline_access", "User.Read", "Mail.Read"] },
-  azure:      { clientIdEnv: "AZURE_CLIENT_ID",        secretEnv: "AZURE_CLIENT_SECRET",       pkce: true,  scopes: ["openid", "profile", "email", "offline_access"] },
-};
-
-function buildLegacyConfig(env: NodeJS.ProcessEnv): RelayConfig {
-  const port = parseInt(env.PORT ?? "5553", 10);
-  const providers: Record<string, ProviderEntry> = {};
-  for (const [key, lp] of Object.entries(LEGACY_PROVIDERS)) {
-    providers[key] = {
-      client_id: env[lp.clientIdEnv] ?? "",
-      ...(lp.secretEnv !== null ? { client_secret: env[lp.secretEnv] ?? "" } : {}),
-      pkce: lp.pkce,
-      scopes: lp.scopes,
-    };
+  const raw = readFileSync(configPath, "utf8");
+  const parsed = yamlLoad(raw) as Record<string, unknown> | null;
+  const resolved = resolveDeep(parsed ?? {}, env);
+  const config = ConfigSchema.parse(resolved);
+  // Derive base_url from port if not set
+  if (config.server.base_url === "") {
+    config.server.base_url = `http://localhost:${String(config.server.port)}`;
   }
-  return {
-    server: {
-      port,
-      base_url: env.BASE_URL ?? `http://localhost:${String(port)}`,
-      tls: {
-        cert_file: env.TLS_CERT_FILE ?? "",
-        key_file: env.TLS_KEY_FILE ?? "",
-      },
-    },
-    status: { password: env.STATUS_PASSWORD ?? "" },
-    relay: {
-      timestamp_tolerance_s: 30,
-      ping_interval_ms: 30_000,
-      pong_timeout_ms: 10_000,
-      request_timeout_ms: 30_000,
-      nonce_ttl_ms: 60_000,
-    },
-    broker: {
-      session_ttl_ms: 300_000,
-      signing_key_file: env.BROKER_SIGNING_KEY_FILE ?? "",
-      providers,
-    },
-  };
+  return config;
 }
