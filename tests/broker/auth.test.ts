@@ -9,8 +9,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { buildBrokerRouter } from "../../src/broker/router.js";
 import { buildSignedPayload } from "../../src/broker/crypto.js";
+import type { ProviderConfig } from "../../src/broker/providers.js";
 import { SessionStore } from "../../src/broker/sessions.js";
 import { RelayServer } from "../../src/relay/server.js";
+
+/** Test provider map with a single "github" provider. */
+function testProviders(): ReadonlyMap<string, ProviderConfig> {
+  return new Map([
+    ["github", { grantKey: "github", clientId: "test-client-id", pkce: true, scopes: ["user", "repo"] }],
+  ]);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -110,7 +118,7 @@ describe("Broker /auth/:provider", () => {
     sessions = new SessionStore();
 
     const app = express();
-    app.use(buildBrokerRouter(relayServer, sessions));
+    app.use(buildBrokerRouter(relayServer, sessions, testProviders()));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -343,7 +351,7 @@ describe("Broker /callback/:provider", () => {
     sessions = new SessionStore();
 
     const app = express();
-    app.use(buildBrokerRouter(relayServer, sessions));
+    app.use(buildBrokerRouter(relayServer, sessions, testProviders()));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {

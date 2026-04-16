@@ -3,7 +3,7 @@
  * O(1) lookup and insertion. Entries are evicted after their TTL expires.
  */
 
-const NONCE_TTL_MS = 60_000;
+const DEFAULT_NONCE_TTL_MS = 60_000;
 
 interface NonceEntry {
   expiresAt: number;
@@ -12,9 +12,14 @@ interface NonceEntry {
 
 export class NonceStore {
   private readonly store = new Map<string, NonceEntry>();
+  private readonly ttlMs: number;
+
+  constructor(ttlMs: number = DEFAULT_NONCE_TTL_MS) {
+    this.ttlMs = ttlMs;
+  }
 
   /**
-   * Returns true if the nonce has been seen within the last 60 seconds.
+   * Returns true if the nonce has been seen within the TTL window.
    * Registers the nonce so future calls return true.
    */
   check(nonce: string): boolean {
@@ -23,11 +28,11 @@ export class NonceStore {
     }
     const timer = setTimeout(() => {
       this.store.delete(nonce);
-    }, NONCE_TTL_MS);
+    }, this.ttlMs);
     // Allow Node.js to exit even if the timer is still pending
     timer.unref();
 
-    this.store.set(nonce, { expiresAt: Date.now() + NONCE_TTL_MS, timer });
+    this.store.set(nonce, { expiresAt: Date.now() + this.ttlMs, timer });
     return false;
   }
 

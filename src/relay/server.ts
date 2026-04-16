@@ -29,15 +29,6 @@ import type {
 import { HelloMessageSchema, ResponseMessageSchema } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const TIMESTAMP_TOLERANCE_S = 30;
-const PING_INTERVAL_MS = 30_000;
-const PONG_TIMEOUT_MS = 10_000;
-const REQUEST_TIMEOUT_MS = 30_000;
-
-// ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
 
@@ -87,6 +78,12 @@ export interface RelayServerOptions {
   server?: Server;
   /** Port to listen on when no server is provided */
   port?: number;
+  /** Tuning — all optional, defaults to protocol spec values */
+  timestampToleranceS?: number;
+  pingIntervalMs?: number;
+  pongTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  nonceTtlMs?: number;
 }
 
 export class RelayServer extends EventEmitter {
@@ -95,10 +92,21 @@ export class RelayServer extends EventEmitter {
   private readonly clients = new Map<string, ConnectedClient>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly baseUrl: string;
+  private readonly timestampToleranceS: number;
+  private readonly pingIntervalMs: number;
+  private readonly pongTimeoutMs: number;
+  private readonly requestTimeoutMs: number;
 
   constructor(opts: RelayServerOptions) {
     super();
     this.baseUrl = opts.baseUrl;
+    this.timestampToleranceS = opts.timestampToleranceS ?? 30;
+    this.pingIntervalMs = opts.pingIntervalMs ?? 30_000;
+    this.pongTimeoutMs = opts.pongTimeoutMs ?? 10_000;
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? 30_000;
+    if (opts.nonceTtlMs !== undefined) {
+      this.nonces = new NonceStore(opts.nonceTtlMs);
+    }
 
     if (opts.server !== undefined) {
       this.wss = new WebSocketServer({ server: opts.server });
@@ -178,7 +186,7 @@ export class RelayServer extends EventEmitter {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new ForwardTimeoutError(id));
-      }, REQUEST_TIMEOUT_MS);
+      }, this.requestTimeoutMs);
       timer.unref();
 
       this.pending.set(id, { resolve, reject, timer });
@@ -293,9 +301,9 @@ export class RelayServer extends EventEmitter {
           pongTimer = setTimeout(() => {
             ws.terminate();
             cleanup();
-          }, PONG_TIMEOUT_MS);
+          }, this.pongTimeoutMs);
           pongTimer.unref();
-        }, PING_INTERVAL_MS);
+        }, this.pingIntervalMs);
         pingTimer.unref();
 
         return;
@@ -360,7 +368,7 @@ export class RelayServer extends EventEmitter {
 
     // Step 3: Verify timestamp within ±30 s
     const now = Math.floor(Date.now() / 1000);
-    if (Math.abs(now - hello.timestamp) > TIMESTAMP_TOLERANCE_S) {
+    if (Math.abs(now - hello.timestamp) > this.timestampToleranceS) {
       return "timestamp out of range";
     }
 

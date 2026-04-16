@@ -5,41 +5,46 @@
  *  - RelayServer (WebSocket tunnel)
  *  - Grant OAuth middleware
  *  - Broker Express router
- * and starts an HTTP(S) server on PORT (default 5553).
+ * and starts an HTTP(S) server on the configured port (default 5553).
  *
- * TLS: if TLS_CERT_FILE and TLS_KEY_FILE are set, creates an HTTPS server.
- * Otherwise, creates a plain HTTP server (for use behind Cloudflare/nginx TLS termination).
+ * Configuration: reads relay.yaml (or --config / RELAY_CONFIG env).
+ * Falls back to process.env if no YAML file exists.
  */
 
 import { readFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import express from "express";
+import { loadConfig } from "./config.js";
 import { RelayServer } from "./relay/server.js";
 import { buildGrantMiddleware } from "./broker/grant.js";
 import { buildBrokerRouter } from "./broker/router.js";
+import { buildProviderMap } from "./broker/providers.js";
 import { SessionStore } from "./broker/sessions.js";
-import { PROVIDER_CONFIGS } from "./broker/providers.js";
 import { MetricsCollector } from "./status/metrics.js";
 import { statusAuth } from "./status/auth.js";
 import { renderStatusPage, buildStatusJson } from "./status/page.js";
 
-const PORT = parseInt(process.env.PORT ?? "5553", 10);
-const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT.toString()}`;
-const TLS_CERT_FILE = process.env.TLS_CERT_FILE;
-const TLS_KEY_FILE = process.env.TLS_KEY_FILE;
+// ---------------------------------------------------------------------------
+// Load config
+// ---------------------------------------------------------------------------
+
+const config = loadConfig();
+const { server: serverCfg, relay: relayCfg, broker: brokerCfg, status: statusCfg } = config;
+
+// ---------------------------------------------------------------------------
+// Express app + HTTP(S) server
+// ---------------------------------------------------------------------------
 
 const app = express();
 
-// Create the HTTP/HTTPS server before wiring the WebSocket server
-// so both share the same port.
 let httpServer: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer>;
 
-if (TLS_CERT_FILE !== undefined && TLS_KEY_FILE !== undefined) {
+if (serverCfg.tls.cert_file !== "" && serverCfg.tls.key_file !== "") {
   httpServer = createHttpsServer(
     {
-      cert: readFileSync(TLS_CERT_FILE),
-      key: readFileSync(TLS_KEY_FILE),
+      cert: readFileSync(serverCfg.tls.cert_file),
+      key: readFileSync(serverCfg.tls.key_file),
     },
     app,
   );
@@ -47,14 +52,26 @@ if (TLS_CERT_FILE !== undefined && TLS_KEY_FILE !== undefined) {
   httpServer = createHttpServer(app);
 }
 
-// Relay server attaches to the same HTTP server, sharing port
-const relayServer = new RelayServer({ baseUrl: BASE_URL, server: httpServer });
+// ---------------------------------------------------------------------------
+// Relay server
+// ---------------------------------------------------------------------------
 
-// Metrics collector
+const relayServer = new RelayServer({
+  baseUrl: serverCfg.base_url,
+  server: httpServer,
+  timestampToleranceS: relayCfg.timestamp_tolerance_s,
+  pingIntervalMs: relayCfg.ping_interval_ms,
+  pongTimeoutMs: relayCfg.pong_timeout_ms,
+  requestTimeoutMs: relayCfg.request_timeout_ms,
+  nonceTtlMs: relayCfg.nonce_ttl_ms,
+});
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
 const metrics = new MetricsCollector();
-const STATUS_PASSWORD = process.env.STATUS_PASSWORD;
 
-// Wire relay lifecycle events to metrics
 relayServer.on("client:connected", (uuid: string) => {
   metrics.registerClient(uuid);
 });
@@ -62,22 +79,20 @@ relayServer.on("client:disconnected", (uuid: string) => {
   metrics.removeClient(uuid);
 });
 
-// Session store
-const sessions = new SessionStore();
+// ---------------------------------------------------------------------------
+// OAuth broker
+// ---------------------------------------------------------------------------
 
-// Grant middleware (OAuth broker)
-const grantMiddleware = buildGrantMiddleware(PROVIDER_CONFIGS, BASE_URL);
+const providers = buildProviderMap(config);
+const sessions = new SessionStore(brokerCfg.session_ttl_ms);
+
+const grantMiddleware = buildGrantMiddleware(providers, serverCfg.base_url);
 app.use(grantMiddleware);
-
-// Broker router
-app.use(buildBrokerRouter(relayServer, sessions));
+app.use(buildBrokerRouter(relayServer, sessions, providers));
 
 // ---------------------------------------------------------------------------
 // Inbound request forwarding — shared handler
 // ---------------------------------------------------------------------------
-// Accepts any HTTP method. Reads the raw body, forwards via the WebSocket tunnel
-// to the connected daemon, and streams the daemon's response back to the caller.
-// URL rewriting handled daemon-side — see dicode-core feat/transparent-relay-proxy
 
 function forwardToClient(
   req: express.Request,
@@ -136,11 +151,12 @@ app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req
 });
 
 // Status dashboard (password-protected)
-app.get("/status", statusAuth(STATUS_PASSWORD), (_req, res) => {
+const statusPassword = statusCfg.password !== "" ? statusCfg.password : undefined;
+app.get("/status", statusAuth(statusPassword), (_req, res) => {
   res.type("html").send(renderStatusPage(metrics.snapshot()));
 });
 
-app.get("/api/status", statusAuth(STATUS_PASSWORD), (_req, res) => {
+app.get("/api/status", statusAuth(statusPassword), (_req, res) => {
   res.json(buildStatusJson(metrics.snapshot()));
 });
 
@@ -150,9 +166,10 @@ app.get("/health", (_req, res) => {
 });
 
 // Start listening
-httpServer.listen(PORT, () => {
-  console.log(`dicode-relay listening on port ${PORT.toString()}`);
-  console.log(`Base URL: ${BASE_URL}`);
+httpServer.listen(serverCfg.port, () => {
+  console.log(`dicode-relay listening on port ${String(serverCfg.port)}`);
+  console.log(`Base URL: ${serverCfg.base_url}`);
+  console.log(`Providers: ${[...providers.keys()].join(", ") || "(none configured)"}`);
 });
 
 // Graceful shutdown

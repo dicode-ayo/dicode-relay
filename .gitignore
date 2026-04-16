@@ -1,4 +1,6 @@
 node_modules
 dist
 coverage
-.remember/
+.remember
+broker-signing-key.pem
+.claude/worktrees/
