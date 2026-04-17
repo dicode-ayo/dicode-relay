@@ -9,8 +9,20 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { buildBrokerRouter } from "../../src/broker/router.js";
 import { buildSignedPayload } from "../../src/broker/crypto.js";
+import type { ProviderConfig } from "../../src/broker/providers.js";
 import { SessionStore } from "../../src/broker/sessions.js";
 import { RelayServer } from "../../src/relay/server.js";
+import { testSessionTtlMs, testRelayOpts } from "../helpers.js";
+
+/** Test provider map with a single "github" provider. */
+function testProviders(): ReadonlyMap<string, ProviderConfig> {
+  return new Map([
+    [
+      "github",
+      { grantKey: "github", clientId: "test-client-id", pkce: true, scopes: ["user", "repo"] },
+    ],
+  ]);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -106,11 +118,11 @@ describe("Broker /auth/:provider", () => {
   let sessions: SessionStore;
 
   beforeEach(async () => {
-    relayServer = new RelayServer({ baseUrl: "wss://relay.dicode.app" });
-    sessions = new SessionStore();
+    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
+    sessions = new SessionStore(testSessionTtlMs);
 
     const app = express();
-    app.use(buildBrokerRouter(relayServer, sessions));
+    app.use(buildBrokerRouter(relayServer, sessions, testProviders()));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -339,11 +351,11 @@ describe("Broker /callback/:provider", () => {
   let sessions: SessionStore;
 
   beforeEach(async () => {
-    relayServer = new RelayServer({ baseUrl: "wss://relay.dicode.app" });
-    sessions = new SessionStore();
+    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
+    sessions = new SessionStore(testSessionTtlMs);
 
     const app = express();
-    app.use(buildBrokerRouter(relayServer, sessions));
+    app.use(buildBrokerRouter(relayServer, sessions, testProviders()));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {

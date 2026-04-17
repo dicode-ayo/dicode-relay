@@ -2,6 +2,7 @@ import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { RelayServer } from "../../src/relay/server.js";
+import { testRelayOpts } from "../helpers.js";
 
 function generateSigningIdentity(): {
   uuid: string;
@@ -62,7 +63,7 @@ describe("RelayServer events", () => {
   let server: RelayServer;
 
   beforeEach(() => {
-    server = new RelayServer({ baseUrl: "ws://localhost", port: 0 });
+    server = new RelayServer(testRelayOpts({ port: 0 }));
   });
 
   afterEach(async () => {

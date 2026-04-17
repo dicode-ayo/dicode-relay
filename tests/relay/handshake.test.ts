@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { RelayServer } from "../../src/relay/server.js";
 import { NonceStore } from "../../src/relay/nonces.js";
+import { testRelayOpts, testNonceTtlMs } from "../helpers.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -105,7 +106,7 @@ describe("Relay handshake", () => {
   let port: number;
 
   beforeEach(() => {
-    server = new RelayServer({ baseUrl: "wss://relay.dicode.app" });
+    server = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
     port = server.port;
   });
 
@@ -179,7 +180,7 @@ describe("Relay handshake", () => {
   });
 
   it("replayed nonce: NonceStore rejects duplicate nonces", () => {
-    const store = new NonceStore();
+    const store = new NonceStore(testNonceTtlMs);
     const nonce = randomBytes(32).toString("hex");
 
     // First check: not seen yet → registers and returns false
@@ -270,7 +271,7 @@ describe("Relay handshake", () => {
 
 describe("NonceStore", () => {
   it("check returns false first time, true second time for same nonce", () => {
-    const store = new NonceStore();
+    const store = new NonceStore(testNonceTtlMs);
     const nonce = randomBytes(32).toString("hex");
 
     expect(store.check(nonce)).toBe(false);
@@ -279,7 +280,7 @@ describe("NonceStore", () => {
   });
 
   it("different nonces are tracked independently", () => {
-    const store = new NonceStore();
+    const store = new NonceStore(testNonceTtlMs);
     const n1 = randomBytes(32).toString("hex");
     const n2 = randomBytes(32).toString("hex");
 
@@ -296,7 +297,7 @@ describe("NonceStore", () => {
   it("nonce expires after TTL (60 s)", () => {
     vi.useFakeTimers();
     try {
-      const store = new NonceStore();
+      const store = new NonceStore(testNonceTtlMs);
       const nonce = randomBytes(32).toString("hex");
 
       expect(store.check(nonce)).toBe(false);

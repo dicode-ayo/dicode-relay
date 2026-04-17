@@ -14,7 +14,7 @@ import { Router, type Request, type Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import type { RelayServer } from "../relay/server.js";
 import { buildSignedPayload, eciesEncrypt, verifyECDSA } from "./crypto.js";
-import { PROVIDER_CONFIGS } from "./providers.js";
+import type { ProviderConfig } from "./providers.js";
 import type { SessionStore } from "./sessions.js";
 import type { OAuthTokenDeliveryPayload } from "../relay/protocol.js";
 
@@ -23,10 +23,15 @@ const TIMESTAMP_TOLERANCE_S = 30;
 /**
  * Build the Express router for the OAuth broker.
  *
- * @param relay    RelayServer instance — used to look up clients and forward tokens
- * @param sessions SessionStore instance
+ * @param relay     RelayServer instance — used to look up clients and forward tokens
+ * @param sessions  SessionStore instance
+ * @param providers Enabled provider map (from config, already resolved)
  */
-export function buildBrokerRouter(relay: RelayServer, sessions: SessionStore): Router {
+export function buildBrokerRouter(
+  relay: RelayServer,
+  sessions: SessionStore,
+  providers: ReadonlyMap<string, ProviderConfig>,
+): Router {
   const router = Router();
 
   // -------------------------------------------------------------------------
@@ -51,7 +56,7 @@ export function buildBrokerRouter(relay: RelayServer, sessions: SessionStore): R
       return;
     }
 
-    if (!PROVIDER_CONFIGS.has(provider)) {
+    if (!providers.has(provider)) {
       res.status(404).json({ error: `unknown provider: ${provider}` });
       return;
     }

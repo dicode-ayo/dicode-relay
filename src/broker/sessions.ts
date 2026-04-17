@@ -6,8 +6,6 @@
  * TTL: 5 minutes. Sessions that have not been completed by then are purged.
  */
 
-const SESSION_TTL_MS = 5 * 60 * 1000;
-
 export interface Session {
   /** UUID v4 of the broker session */
   sessionId: string;
@@ -28,10 +26,15 @@ export interface Session {
 export class SessionStore {
   private readonly store = new Map<string, Session>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly ttlMs: number;
+
+  constructor(ttlMs: number) {
+    this.ttlMs = ttlMs;
+  }
 
   /**
    * Store a new session. Replaces any existing session with the same ID.
-   * Automatically expires after 5 minutes.
+   * Automatically expires after the configured TTL.
    */
   set(session: Session): void {
     // Clear any existing timer for this session ID
@@ -45,7 +48,7 @@ export class SessionStore {
     const timer = setTimeout(() => {
       this.store.delete(session.sessionId);
       this.timers.delete(session.sessionId);
-    }, SESSION_TTL_MS);
+    }, this.ttlMs);
     timer.unref();
 
     this.timers.set(session.sessionId, timer);
