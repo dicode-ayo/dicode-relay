@@ -32,16 +32,16 @@
     "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^25.5.2",
-    "@types/uuid": "^10.0.0",
+    "@types/node": "^25.6.0",
+    "@types/uuid": "^11.0.0",
     "@types/ws": "^8.5.13",
     "@vitest/coverage-v8": "^4.1.4",
     "eslint": "^10.2.0",
     "jiti": "^2.6.1",
-    "prettier": "^3.4.2",
+    "prettier": "^3.8.3",
     "tsx": "^4.19.2",
-    "typescript": "^6.0.2",
-    "typescript-eslint": "^8.58.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.58.2",
     "vitest": "^4.1.4"
   }
 }
