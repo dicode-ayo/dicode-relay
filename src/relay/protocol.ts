@@ -22,6 +22,9 @@ export const WelcomeMessageSchema = z.object({
   type: z.literal("welcome"),
   /** Full WSS URL for this client, e.g. wss://relay.dicode.app/u/<uuid>/hooks/ */
   url: z.url(),
+  /** Base64-encoded SPKI DER public key the broker uses to sign delivery envelopes.
+   *  Daemons pin this on first connect (TOFU) and verify it on subsequent connects. */
+  broker_pubkey: z.string().optional(),
 });
 
 export const ErrorMessageSchema = z.object({
@@ -113,4 +116,12 @@ export interface OAuthTokenDeliveryPayload {
   ciphertext: string;
   /** Base64-encoded 12-byte AES-GCM nonce (IV) */
   nonce: string;
+  /**
+   * Base64-encoded ECDSA P-256 signature over
+   * sha256(type || session_id || ephemeral_pubkey || ciphertext || nonce).
+   * Signed by the broker's long-lived key whose public half is announced
+   * in the WSS welcome message. Proves the envelope was assembled by a
+   * trusted broker, not a forger who merely knows the daemon's public key.
+   */
+  broker_sig?: string;
 }

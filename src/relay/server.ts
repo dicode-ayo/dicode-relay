@@ -84,6 +84,8 @@ export interface RelayServerOptions {
   pongTimeoutMs: number;
   requestTimeoutMs: number;
   nonceTtlMs: number;
+  /** Base64-encoded SPKI DER public key for broker delivery signing. Announced in the welcome message. */
+  brokerPubkey?: string;
 }
 
 export class RelayServer extends EventEmitter {
@@ -96,6 +98,7 @@ export class RelayServer extends EventEmitter {
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly brokerPubkey: string | undefined;
 
   constructor(opts: RelayServerOptions) {
     super();
@@ -105,6 +108,7 @@ export class RelayServer extends EventEmitter {
     this.pingIntervalMs = opts.pingIntervalMs;
     this.pongTimeoutMs = opts.pongTimeoutMs;
     this.requestTimeoutMs = opts.requestTimeoutMs;
+    this.brokerPubkey = opts.brokerPubkey;
 
     if (opts.server !== undefined) {
       this.wss = new WebSocketServer({ server: opts.server });
@@ -285,6 +289,7 @@ export class RelayServer extends EventEmitter {
         const welcome: WelcomeMessage = {
           type: "welcome",
           url: `${this.baseUrl}/u/${hello.uuid}/hooks/`,
+          ...(this.brokerPubkey !== undefined ? { broker_pubkey: this.brokerPubkey } : {}),
         };
         this.sendMessage(ws, welcome);
         this.emit("client:connected", hello.uuid);

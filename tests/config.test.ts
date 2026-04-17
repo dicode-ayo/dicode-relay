@@ -4,7 +4,7 @@
 
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, defaultConfig } from "../src/config.js";
 import { buildProviderMap } from "../src/broker/providers.js";
 
@@ -34,6 +34,7 @@ describe("loadConfig", () => {
   const tmpPath = join(process.cwd(), "test-relay-config.yaml");
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     try {
       unlinkSync(tmpPath);
     } catch {
@@ -57,29 +58,12 @@ broker:
 `,
     );
 
-    const env = {
+    const cfg = loadConfig({
       RELAY_CONFIG: tmpPath,
       TEST_SLACK_ID: "xoxb-resolved",
-    };
-
-    // loadConfig reads RELAY_CONFIG from process.env but we can't easily
-    // override process.argv. Instead, test the resolution logic by
-    // calling loadConfig with a patched env after writing the file to
-    // the path loadConfig will check.
-    // For this test, temporarily set process.env.RELAY_CONFIG.
-    const origConfig = process.env.RELAY_CONFIG;
-    process.env.RELAY_CONFIG = tmpPath;
-    try {
-      const cfg = loadConfig(env);
-      expect(cfg.server.port).toBe(9999);
-      expect(cfg.broker.providers.slack?.client_id).toBe("xoxb-resolved");
-    } finally {
-      if (origConfig !== undefined) {
-        process.env.RELAY_CONFIG = origConfig;
-      } else {
-        delete process.env.RELAY_CONFIG;
-      }
-    }
+    });
+    expect(cfg.server.port).toBe(9999);
+    expect(cfg.broker.providers.slack?.client_id).toBe("xoxb-resolved");
   });
 
   it("resolves unset env vars to empty string", () => {
@@ -95,51 +79,30 @@ broker:
 `,
     );
 
-    const origConfig = process.env.RELAY_CONFIG;
-    process.env.RELAY_CONFIG = tmpPath;
-    try {
-      const cfg = loadConfig({});
-      expect(cfg.broker.providers.github?.client_id).toBe("");
-    } finally {
-      if (origConfig !== undefined) {
-        process.env.RELAY_CONFIG = origConfig;
-      } else {
-        delete process.env.RELAY_CONFIG;
-      }
-    }
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.broker.providers.github?.client_id).toBe("");
   });
 
   it("applies Zod defaults for missing sections", () => {
     writeFileSync(tmpPath, "server:\n  port: 7777\n");
 
-    const origConfig = process.env.RELAY_CONFIG;
-    process.env.RELAY_CONFIG = tmpPath;
-    try {
-      const cfg = loadConfig({});
-      expect(cfg.server.port).toBe(7777);
-      expect(cfg.relay.ping_interval_ms).toBe(30_000); // default
-      expect(cfg.broker.session_ttl_ms).toBe(300_000); // default
-    } finally {
-      if (origConfig !== undefined) {
-        process.env.RELAY_CONFIG = origConfig;
-      } else {
-        delete process.env.RELAY_CONFIG;
-      }
-    }
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.server.port).toBe(7777);
+    expect(cfg.relay.ping_interval_ms).toBe(30_000); // default
+    expect(cfg.broker.session_ttl_ms).toBe(300_000); // default
+  });
+
+  it("derives base_url from port when empty", () => {
+    writeFileSync(tmpPath, "server:\n  port: 4444\n");
+
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.server.base_url).toBe("http://localhost:4444");
   });
 
   it("throws when config file does not exist", () => {
-    const origConfig = process.env.RELAY_CONFIG;
-    process.env.RELAY_CONFIG = "/nonexistent/relay.yaml";
-    try {
-      expect(() => loadConfig({})).toThrow("Config file not found");
-    } finally {
-      if (origConfig !== undefined) {
-        process.env.RELAY_CONFIG = origConfig;
-      } else {
-        delete process.env.RELAY_CONFIG;
-      }
-    }
+    expect(() => loadConfig({ RELAY_CONFIG: "/nonexistent/relay.yaml" })).toThrow(
+      "Config file not found",
+    );
   });
 });
 

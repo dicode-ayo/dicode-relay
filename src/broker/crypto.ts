@@ -26,6 +26,16 @@ import { promisify } from "node:util";
 const hkdfAsync = promisify(hkdf);
 
 // ---------------------------------------------------------------------------
+// ECIES message type — ASCII-only by contract so that both
+// Buffer.from(type, "utf8") (TS) and []byte(type) (Go) produce
+// identical AAD bytes. A new envelope version must be introduced as a
+// new union member, not as a silent wire-format bump under the same label.
+// ---------------------------------------------------------------------------
+
+/** Discriminated type labels for ECIES-encrypted message envelopes. */
+export type EciesMessageType = "oauth_token_delivery";
+
+// ---------------------------------------------------------------------------
 // buildSignedPayload
 // ---------------------------------------------------------------------------
 
@@ -118,14 +128,20 @@ export interface EciesPayload {
  *   1. Generate ephemeral P-256 keypair
  *   2. ECDH(ephemeral_priv, daemon_pub) → shared_secret
  *   3. HKDF-SHA256(shared_secret, salt=session_id, info="dicode-oauth-token") → 32-byte enc_key
- *   4. AES-256-GCM encrypt with random 12-byte nonce
+ *   4. AES-256-GCM encrypt with random 12-byte nonce, binding `messageType`
+ *      into the GCM authenticated data so the envelope's Type field cannot
+ *      be swapped for a different message type without invalidating the
+ *      auth tag. This is domain separation: the same key is never asked
+ *      to decrypt two semantically distinct wire formats cleanly.
  *   5. Append 16-byte auth tag to ciphertext
  */
 export async function eciesEncrypt(
   daemonPubkeyBytes: Buffer,
   sessionId: string,
+  messageType: EciesMessageType,
   plaintext: Buffer,
 ): Promise<EciesPayload> {
+  // messageType is type-enforced via EciesMessageType union — always truthy.
   const eph = createECDH("prime256v1");
   eph.generateKeys();
 
@@ -144,6 +160,7 @@ export async function eciesEncrypt(
 
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encKey, iv);
+  cipher.setAAD(Buffer.from(messageType, "utf8"));
   const ctWithoutTag = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const authTag = cipher.getAuthTag(); // 16 bytes
 
@@ -165,13 +182,15 @@ export async function eciesEncrypt(
  * Decrypt an ECIES payload using the daemon's private key.
  * This mirrors what the Go daemon does on receipt of an oauth_token_delivery message.
  *
- * @param daemonPrivKeyPem PEM-encoded PKCS#8 private key
- * @param sessionId        Must match the salt used during encryption
- * @param payload          The EciesPayload from eciesEncrypt
+ * @param daemonECDH   ECDH instance holding the daemon's private key (prime256v1)
+ * @param sessionId    Must match the salt used during encryption
+ * @param messageType  Domain-separation label bound into GCM AAD (must match encrypt)
+ * @param payload      The EciesPayload from eciesEncrypt
  */
 export async function eciesDecrypt(
   daemonECDH: ReturnType<typeof createECDH>,
   sessionId: string,
+  messageType: EciesMessageType,
   payload: EciesPayload,
 ): Promise<Buffer> {
   const ephPubBytes = Buffer.from(payload.ephemeralPubkey, "base64");
@@ -194,6 +213,7 @@ export async function eciesDecrypt(
   const authTag = ciphertextWithTag.subarray(ciphertextWithTag.length - 16);
 
   const decipher = createDecipheriv("aes-256-gcm", encKey, iv);
+  decipher.setAAD(Buffer.from(messageType, "utf8"));
   decipher.setAuthTag(authTag);
 
   return Buffer.concat([decipher.update(ct), decipher.final()]);

@@ -21,6 +21,7 @@ import { buildGrantMiddleware } from "./broker/grant.js";
 import { buildBrokerRouter } from "./broker/router.js";
 import { buildProviderMap } from "./broker/providers.js";
 import { SessionStore } from "./broker/sessions.js";
+import { loadBrokerSigningKey } from "./broker/signing.js";
 import { MetricsCollector } from "./status/metrics.js";
 import { statusAuth } from "./status/auth.js";
 import { renderStatusPage, buildStatusJson } from "./status/page.js";
@@ -53,6 +54,12 @@ if (serverCfg.tls.cert_file !== "" && serverCfg.tls.key_file !== "") {
 }
 
 // ---------------------------------------------------------------------------
+// Broker signing key
+// ---------------------------------------------------------------------------
+
+const brokerKey = loadBrokerSigningKey();
+
+// ---------------------------------------------------------------------------
 // Relay server
 // ---------------------------------------------------------------------------
 
@@ -64,6 +71,7 @@ const relayServer = new RelayServer({
   pongTimeoutMs: relayCfg.pong_timeout_ms,
   requestTimeoutMs: relayCfg.request_timeout_ms,
   nonceTtlMs: relayCfg.nonce_ttl_ms,
+  brokerPubkey: brokerKey.publicKeyBase64,
 });
 
 // ---------------------------------------------------------------------------
@@ -88,7 +96,9 @@ const sessions = new SessionStore(brokerCfg.session_ttl_ms);
 
 const grantMiddleware = buildGrantMiddleware(providers, serverCfg.base_url);
 app.use(grantMiddleware);
-app.use(buildBrokerRouter(relayServer, sessions, providers));
+app.use(
+  buildBrokerRouter(relayServer, sessions, providers, relayCfg.timestamp_tolerance_s, brokerKey),
+);
 
 // ---------------------------------------------------------------------------
 // Inbound request forwarding — shared handler

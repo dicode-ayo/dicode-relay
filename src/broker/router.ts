@@ -17,20 +17,23 @@ import { buildSignedPayload, eciesEncrypt, verifyECDSA } from "./crypto.js";
 import type { ProviderConfig } from "./providers.js";
 import type { SessionStore } from "./sessions.js";
 import type { OAuthTokenDeliveryPayload } from "../relay/protocol.js";
-
-const TIMESTAMP_TOLERANCE_S = 30;
+import { buildDeliverySignaturePayload, type BrokerSigningKey } from "./signing.js";
 
 /**
  * Build the Express router for the OAuth broker.
  *
- * @param relay     RelayServer instance — used to look up clients and forward tokens
- * @param sessions  SessionStore instance
- * @param providers Enabled provider map (from config, already resolved)
+ * @param relay               RelayServer instance
+ * @param sessions            SessionStore instance
+ * @param providers           Enabled provider map (from config, already resolved)
+ * @param timestampToleranceS Max clock skew in seconds (from config.relay.timestamp_tolerance_s)
+ * @param brokerKey           Broker's signing key (signs delivery envelopes for authenticity)
  */
 export function buildBrokerRouter(
   relay: RelayServer,
   sessions: SessionStore,
   providers: ReadonlyMap<string, ProviderConfig>,
+  timestampToleranceS = 30,
+  brokerKey?: BrokerSigningKey,
 ): Router {
   const router = Router();
 
@@ -103,7 +106,7 @@ export function buildBrokerRouter(
       return;
     }
     const now = Math.floor(Date.now() / 1000);
-    if (Math.abs(now - ts) > TIMESTAMP_TOLERANCE_S) {
+    if (Math.abs(now - ts) > timestampToleranceS) {
       res.status(403).json({ error: "timestamp out of range" });
       return;
     }
@@ -140,6 +143,12 @@ export function buildBrokerRouter(
     const redirectPath =
       `/connect/${provider}?state=${encodeURIComponent(session)}` +
       (scope !== undefined && scope !== "" ? `&scope=${encodeURIComponent(scope)}` : "");
+    // Suppress Referer on the redirect so the upstream provider's consent
+    // page does not receive the session_id, sig, or challenge in its access
+    // logs. Without this, browsers forward the full /auth/:provider?… URL
+    // as the Referer header on the navigation to the provider's authorize
+    // endpoint.
+    res.setHeader("Referrer-Policy", "no-referrer");
     res.redirect(302, redirectPath);
   });
 
@@ -155,7 +164,7 @@ export function buildBrokerRouter(
     // The actual Grant callback is handled by Grant middleware before this route,
     // which populates req.session or passes via query. With transport: 'querystring',
     // Grant redirects to this callback URL with the token as query params.
-    void handleCallback(req, res, relay, sessions);
+    void handleCallback(req, res, relay, sessions, brokerKey);
   });
 
   return router;
@@ -166,6 +175,7 @@ async function handleCallback(
   res: Response,
   relay: RelayServer,
   sessions: SessionStore,
+  brokerKey?: BrokerSigningKey,
 ): Promise<void> {
   const rawQuery = req.query as Record<string, string | string[] | undefined>;
   const state = Array.isArray(rawQuery.state) ? rawQuery.state[0] : rawQuery.state;
@@ -197,23 +207,39 @@ async function handleCallback(
     Object.entries(rawTokenData).filter(([k]) => k !== "state"),
   );
 
-  // Encrypt the token payload with ECIES for the daemon
+  // Encrypt the token payload with ECIES for the daemon. The message type
+  // is bound into GCM's authenticated data so the daemon can never decrypt
+  // this envelope under a different type label — see crypto.ts.
+  const deliveryType = "oauth_token_delivery";
   const plaintext = Buffer.from(JSON.stringify(tokensToDeliver));
   let encrypted: Awaited<ReturnType<typeof eciesEncrypt>>;
   try {
-    encrypted = await eciesEncrypt(session.pubkey, session.sessionId, plaintext);
+    encrypted = await eciesEncrypt(session.pubkey, session.sessionId, deliveryType, plaintext);
   } catch {
     res.status(500).send("<html><body><p>Encryption failed</p></body></html>");
     return;
   }
 
   const deliveryPayload: OAuthTokenDeliveryPayload = {
-    type: "oauth_token_delivery",
+    type: deliveryType,
     session_id: session.sessionId,
     ephemeral_pubkey: encrypted.ephemeralPubkey,
     ciphertext: encrypted.ciphertext,
     nonce: encrypted.nonce,
   };
+
+  // Sign the envelope so the daemon can verify it was assembled by this
+  // broker, not by a forger who merely knows the daemon's public key.
+  if (brokerKey !== undefined) {
+    const sigPayload = buildDeliverySignaturePayload(
+      deliveryPayload.type,
+      deliveryPayload.session_id,
+      deliveryPayload.ephemeral_pubkey,
+      deliveryPayload.ciphertext,
+      deliveryPayload.nonce,
+    );
+    deliveryPayload.broker_sig = brokerKey.sign(sigPayload);
+  }
 
   // Delete session immediately (single-use)
   sessions.delete(session.sessionId);
