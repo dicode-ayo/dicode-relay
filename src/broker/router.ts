@@ -19,20 +19,20 @@ import type { SessionStore } from "./sessions.js";
 import type { OAuthTokenDeliveryPayload } from "../relay/protocol.js";
 import { buildDeliverySignaturePayload, type BrokerSigningKey } from "./signing.js";
 
-const TIMESTAMP_TOLERANCE_S = 30;
-
 /**
  * Build the Express router for the OAuth broker.
  *
- * @param relay      RelayServer instance
- * @param sessions   SessionStore instance
- * @param providers  Enabled provider map (from config, already resolved)
- * @param brokerKey  Broker's signing key (signs delivery envelopes for authenticity)
+ * @param relay               RelayServer instance
+ * @param sessions            SessionStore instance
+ * @param providers           Enabled provider map (from config, already resolved)
+ * @param timestampToleranceS Max clock skew in seconds (from config.relay.timestamp_tolerance_s)
+ * @param brokerKey           Broker's signing key (signs delivery envelopes for authenticity)
  */
 export function buildBrokerRouter(
   relay: RelayServer,
   sessions: SessionStore,
   providers: ReadonlyMap<string, ProviderConfig>,
+  timestampToleranceS = 30,
   brokerKey?: BrokerSigningKey,
 ): Router {
   const router = Router();
@@ -106,7 +106,7 @@ export function buildBrokerRouter(
       return;
     }
     const now = Math.floor(Date.now() / 1000);
-    if (Math.abs(now - ts) > TIMESTAMP_TOLERANCE_S) {
+    if (Math.abs(now - ts) > timestampToleranceS) {
       res.status(403).json({ error: "timestamp out of range" });
       return;
     }

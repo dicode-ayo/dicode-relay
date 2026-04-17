@@ -17,7 +17,13 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 
 function resolveEnvVars(value: string, env: NodeJS.ProcessEnv = process.env): string {
-  return value.replace(/\$\{([^}]+)\}/g, (_, name: string) => env[name] ?? "");
+  return value.replace(/\$\{([^}]*)\}/g, (_match, name: string) => {
+    if (name === "") {
+      console.warn(`config: empty \${} interpolation — likely a typo in relay.yaml`);
+      return "";
+    }
+    return env[name] ?? "";
+  });
 }
 
 /** Recursively walk a parsed YAML value and resolve ${...} in all strings. */
@@ -50,11 +56,16 @@ const TlsSchema = z.object({
   key_file: z.string().default(""),
 });
 
-const ServerSchema = z.object({
-  port: z.number().int().default(5553),
-  base_url: z.string().default(""),
-  tls: TlsSchema.default(() => TlsSchema.parse({})),
-});
+const ServerSchema = z
+  .object({
+    port: z.number().int().default(5553),
+    base_url: z.string().default(""),
+    tls: TlsSchema.default(() => TlsSchema.parse({})),
+  })
+  .transform((s) => ({
+    ...s,
+    base_url: s.base_url !== "" ? s.base_url : `http://localhost:${String(s.port)}`,
+  }));
 
 const StatusSchema = z.object({
   password: z.string().default(""),
@@ -82,7 +93,6 @@ const ConfigSchema = z.object({
 });
 
 export type RelayConfig = z.infer<typeof ConfigSchema>;
-export type ProviderEntry = z.infer<typeof ProviderSchema>;
 
 /** Parse an empty object through the schema to get all Zod defaults.
  *  Use in tests instead of duplicating default values. */
@@ -95,7 +105,7 @@ export function defaultConfig(): RelayConfig {
 // ---------------------------------------------------------------------------
 
 /** Determine the config file path from CLI args or env. */
-function resolveConfigPath(): string {
+function resolveConfigPath(env: NodeJS.ProcessEnv): string {
   const args = process.argv;
   for (let i = 0; i < args.length - 1; i++) {
     if (args[i] === "--config") {
@@ -103,15 +113,15 @@ function resolveConfigPath(): string {
       if (next !== undefined) return next;
     }
   }
-  return process.env.RELAY_CONFIG ?? "relay.yaml";
+  return env.RELAY_CONFIG ?? "relay.yaml";
 }
 
 /**
- * Load and validate the relay config. If the YAML file doesn't exist,
- * falls back to a backward-compatible config built from process.env.
+ * Load and validate the relay config.
+ * Throws if the config file does not exist.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
-  const configPath = resolveConfigPath();
+  const configPath = resolveConfigPath(env);
 
   if (!existsSync(configPath)) {
     throw new Error(
@@ -123,10 +133,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
   const raw = readFileSync(configPath, "utf8");
   const parsed = yamlLoad(raw) as Record<string, unknown> | null;
   const resolved = resolveDeep(parsed ?? {}, env);
-  const config = ConfigSchema.parse(resolved);
-  // Derive base_url from port if not set
-  if (config.server.base_url === "") {
-    config.server.base_url = `http://localhost:${String(config.server.port)}`;
-  }
-  return config;
+  return ConfigSchema.parse(resolved);
 }

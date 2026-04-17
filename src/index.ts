@@ -96,7 +96,9 @@ const sessions = new SessionStore(brokerCfg.session_ttl_ms);
 
 const grantMiddleware = buildGrantMiddleware(providers, serverCfg.base_url);
 app.use(grantMiddleware);
-app.use(buildBrokerRouter(relayServer, sessions, providers, brokerKey));
+app.use(
+  buildBrokerRouter(relayServer, sessions, providers, relayCfg.timestamp_tolerance_s, brokerKey),
+);
 
 // ---------------------------------------------------------------------------
 // Inbound request forwarding — shared handler
