@@ -127,11 +127,16 @@ export function buildBrokerRouter(
       return;
     }
 
-    // Store session
+    // Store session. The `pubkey` field carries whatever key the broker will
+    // use as the ECIES recipient when the token comes back. Protocol v2
+    // daemons (dicode-core#104 / dicode-relay#28) advertise a distinct
+    // `decrypt_pubkey` in their hello; pre-v2 daemons don't, and we fall
+    // back to the handshake pubkey. ECDSA verification above uses
+    // `client.pubkey` unconditionally — the split only affects ECIES.
     sessions.set({
       sessionId: session,
       relayUuid: relay_uuid,
-      pubkey: client.pubkey,
+      pubkey: client.decryptPubkey ?? client.pubkey,
       pkceChallenge: challenge,
       provider,
       expiresAt: Date.now() + 5 * 60 * 1000,
