@@ -114,6 +114,7 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
 
   it("welcome always announces protocol: 2", async () => {
     const identity = generateSigningIdentity();
+    const decryptPubkey = generateDecryptPubkey();
     const { ws, nonce } = await connectAndGetChallenge(port);
     const timestamp = Math.floor(Date.now() / 1000);
     const sig = identity.sign(buildHelloPayload(nonce, timestamp));
@@ -122,6 +123,7 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
       type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
+      decrypt_pubkey: decryptPubkey.toString("base64"),
       sig,
       timestamp,
     });
@@ -154,15 +156,14 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
 
     const client = server.getClient(identity.uuid);
     expect(client.pubkey.equals(identity.pubkeyBytes)).toBe(true);
-    expect(client.decryptPubkey).toBeDefined();
-    expect(client.decryptPubkey?.equals(decryptPubkey)).toBe(true);
-    expect(client.decryptPubkey?.equals(client.pubkey)).toBe(false);
+    expect(client.decryptPubkey.equals(decryptPubkey)).toBe(true);
+    expect(client.decryptPubkey.equals(client.pubkey)).toBe(false);
 
     ws.close();
     await waitForClose(ws);
   });
 
-  it("absent decrypt_pubkey (pre-v2 daemon): client has only pubkey", async () => {
+  it("missing decrypt_pubkey: handshake rejected (required field)", async () => {
     const identity = generateSigningIdentity();
     const { ws, nonce } = await connectAndGetChallenge(port);
     const timestamp = Math.floor(Date.now() / 1000);
@@ -176,13 +177,9 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
       timestamp,
     });
 
-    expect(response.type).toBe("welcome");
+    expect(response.type).toBe("error");
+    expect(server.hasClient(identity.uuid)).toBe(false);
 
-    const client = server.getClient(identity.uuid);
-    expect(client.pubkey.equals(identity.pubkeyBytes)).toBe(true);
-    expect(client.decryptPubkey).toBeUndefined();
-
-    ws.close();
     await waitForClose(ws);
   });
 

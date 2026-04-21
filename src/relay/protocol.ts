@@ -67,11 +67,9 @@ export const HelloMessageSchema = z.object({
    *  Used for ECDSA verification (WSS handshake + /auth/:provider sigs). */
   pubkey: z.string(),
   /** Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
-   *  Used for ECIES encryption on OAuth token delivery. Added in protocol v2
-   *  (dicode-core#104 / dicode-relay#28). When absent, broker falls back to
-   *  `pubkey` for both ECDSA verify and ECIES encrypt — preserving backward
-   *  compatibility with pre-split daemons. */
-  decrypt_pubkey: z.string().optional(),
+   *  Used as the ECIES recipient on OAuth token delivery (dicode-core#104).
+   *  Required: every daemon now ships with a split sign/decrypt identity. */
+  decrypt_pubkey: z.string(),
   /** Base64 std-encoded ECDSA P-256 ASN.1 DER signature */
   sig: z.string(),
   /** Unix timestamp in seconds */

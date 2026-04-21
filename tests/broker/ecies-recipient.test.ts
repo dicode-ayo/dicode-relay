@@ -71,7 +71,7 @@ function buildHelloPayload(nonce: string, timestamp: number): Buffer {
 function connectDaemon(
   relayPort: number,
   identity: SignIdentity,
-  decryptPubkey?: Buffer,
+  decryptPubkey: Buffer,
 ): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${relayPort.toString()}`);
@@ -82,17 +82,16 @@ function connectDaemon(
       const timestamp = Math.floor(Date.now() / 1000);
       const sig = identity.sign(buildHelloPayload(challenge.nonce, timestamp));
 
-      const hello: Record<string, unknown> = {
-        type: "hello",
-        uuid: identity.uuid,
-        pubkey: identity.pubkeyBase64,
-        sig,
-        timestamp,
-      };
-      if (decryptPubkey !== undefined) {
-        hello.decrypt_pubkey = decryptPubkey.toString("base64");
-      }
-      ws.send(JSON.stringify(hello));
+      ws.send(
+        JSON.stringify({
+          type: "hello",
+          uuid: identity.uuid,
+          pubkey: identity.pubkeyBase64,
+          decrypt_pubkey: decryptPubkey.toString("base64"),
+          sig,
+          timestamp,
+        }),
+      );
 
       ws.once("message", (data2: Buffer | string) => {
         const welcome = JSON.parse(typeof data2 === "string" ? data2 : data2.toString()) as {
@@ -167,7 +166,7 @@ describe("Broker ECIES recipient selection", () => {
     sessions.clear();
   });
 
-  it("v2 daemon: session.pubkey = decryptPubkey, distinct from sign pubkey", async () => {
+  it("session.pubkey = decryptPubkey, distinct from sign pubkey", async () => {
     const identity = generateSigningIdentity();
     const decryptPubkey = generateDecryptPubkey();
     const ws = await connectDaemon(relayServer.port, identity, decryptPubkey);
@@ -180,21 +179,6 @@ describe("Broker ECIES recipient selection", () => {
     expect(stored).toBeDefined();
     expect(stored?.pubkey.equals(decryptPubkey)).toBe(true);
     expect(stored?.pubkey.equals(identity.pubkeyBytes)).toBe(false);
-
-    ws.close();
-  });
-
-  it("pre-v2 daemon (no decrypt_pubkey): session.pubkey falls back to sign pubkey", async () => {
-    const identity = generateSigningIdentity();
-    const ws = await connectDaemon(relayServer.port, identity);
-
-    const sessionId = "550e8400-e29b-41d4-a716-446655440001";
-    const response = await startAuth(httpPort, identity, sessionId);
-    expect(response.status).toBe(302);
-
-    const stored = sessions.get(sessionId);
-    expect(stored).toBeDefined();
-    expect(stored?.pubkey.equals(identity.pubkeyBytes)).toBe(true);
 
     ws.close();
   });

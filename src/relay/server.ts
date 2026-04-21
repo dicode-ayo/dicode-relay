@@ -66,11 +66,8 @@ export interface ConnectedClient {
    *  signature verification (WSS handshake + /auth/:provider sigs). */
   pubkey: Buffer;
   /** 65-byte uncompressed P-256 public key used by the broker as the ECIES
-   *  recipient when encrypting OAuth token deliveries. Present only when the
-   *  daemon speaks protocol v2 (dicode-core#104 / dicode-relay#28). When
-   *  undefined, the broker falls back to `pubkey` for ECIES — preserving
-   *  compatibility with pre-split daemons. */
-  decryptPubkey?: Buffer;
+   *  recipient when encrypting OAuth token deliveries (dicode-core#104). */
+  decryptPubkey: Buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,19 +296,16 @@ export class RelayServer extends EventEmitter {
         }
 
         const pubkeyBytes = Buffer.from(hello.pubkey, "base64");
+        // decrypt_pubkey is required; verifyHello already ran the structural +
+        // on-curve validation above.
+        const decryptPubkeyBytes = Buffer.from(hello.decrypt_pubkey, "base64");
 
-        // Optional split-key decrypt pubkey (dicode-core#104 / dicode-relay#28).
-        // Already structurally validated in verifyHello; reuse the decoded bytes.
-        let decryptPubkeyBytes: Buffer | undefined;
-        if (hello.decrypt_pubkey !== undefined && hello.decrypt_pubkey !== "") {
-          decryptPubkeyBytes = Buffer.from(hello.decrypt_pubkey, "base64");
-        }
-
-        const client: ConnectedClient = { ws, uuid: hello.uuid, pubkey: pubkeyBytes };
-        if (decryptPubkeyBytes !== undefined) {
-          client.decryptPubkey = decryptPubkeyBytes;
-        }
-        this.clients.set(hello.uuid, client);
+        this.clients.set(hello.uuid, {
+          ws,
+          uuid: hello.uuid,
+          pubkey: pubkeyBytes,
+          decryptPubkey: decryptPubkeyBytes,
+        });
         registeredUuid = hello.uuid;
 
         const welcome: WelcomeMessage = {
@@ -392,27 +386,23 @@ export class RelayServer extends EventEmitter {
       return "pubkey must be 65 bytes starting with 0x04";
     }
 
-    // Step 1b: If the daemon advertises a separate decrypt_pubkey (protocol v2,
-    // dicode-core#104), validate it structurally and as an on-curve P-256
-    // point. Silent fallback on invalid values would mask a real key problem,
-    // so any parse failure fails the handshake outright.
-    if (hello.decrypt_pubkey !== undefined && hello.decrypt_pubkey !== "") {
-      let decryptBytes: Buffer;
-      try {
-        decryptBytes = Buffer.from(hello.decrypt_pubkey, "base64");
-      } catch {
-        return "invalid decrypt_pubkey encoding";
-      }
-      if (decryptBytes.length !== 65 || decryptBytes[0] !== 0x04) {
-        return "decrypt_pubkey must be 65 bytes starting with 0x04";
-      }
-      // On-curve check: createPublicKey rejects points that don't lie on P-256.
-      try {
-        const spkiDer = uncompressedP256ToSpki(decryptBytes);
-        createPublicKey({ key: spkiDer, format: "der", type: "spki" });
-      } catch {
-        return "decrypt_pubkey is not a valid P-256 point";
-      }
+    // Step 1b: Validate decrypt_pubkey structurally and as an on-curve P-256
+    // point (dicode-core#104). Required — every daemon advertises a split
+    // sign/decrypt identity. Parse failures reject the handshake.
+    let decryptBytes: Buffer;
+    try {
+      decryptBytes = Buffer.from(hello.decrypt_pubkey, "base64");
+    } catch {
+      return "invalid decrypt_pubkey encoding";
+    }
+    if (decryptBytes.length !== 65 || decryptBytes[0] !== 0x04) {
+      return "decrypt_pubkey must be 65 bytes starting with 0x04";
+    }
+    try {
+      const spkiDer = uncompressedP256ToSpki(decryptBytes);
+      createPublicKey({ key: spkiDer, format: "der", type: "spki" });
+    } catch {
+      return "decrypt_pubkey is not a valid P-256 point";
     }
 
     // Step 2: Verify uuid == hex(sha256(pubkey))
