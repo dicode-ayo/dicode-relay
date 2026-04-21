@@ -25,6 +25,11 @@ export const WelcomeMessageSchema = z.object({
   /** Base64-encoded SPKI DER public key the broker uses to sign delivery envelopes.
    *  Daemons pin this on first connect (TOFU) and verify it on subsequent connects. */
   broker_pubkey: z.string().optional(),
+  /** Protocol version announced by the broker. Starts at 2 (dicode-core#104 /
+   *  dicode-relay#28): broker understands the split sign/decrypt key model and
+   *  will encrypt OAuth tokens to the daemon's decrypt_pubkey when provided.
+   *  Daemons that require protocol ≥ 2 for OAuth read this field on welcome. */
+  protocol: z.number().int().optional(),
 });
 
 export const ErrorMessageSchema = z.object({
@@ -58,8 +63,13 @@ export const HelloMessageSchema = z.object({
     .string()
     .length(64)
     .regex(/^[0-9a-f]{64}$/),
-  /** Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y) */
+  /** Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
+   *  Used for ECDSA verification (WSS handshake + /auth/:provider sigs). */
   pubkey: z.string(),
+  /** Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
+   *  Used as the ECIES recipient on OAuth token delivery (dicode-core#104).
+   *  Required: every daemon now ships with a split sign/decrypt identity. */
+  decrypt_pubkey: z.string(),
   /** Base64 std-encoded ECDSA P-256 ASN.1 DER signature */
   sig: z.string(),
   /** Unix timestamp in seconds */

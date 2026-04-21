@@ -7,6 +7,7 @@ import { testRelayOpts } from "../helpers.js";
 function generateSigningIdentity(): {
   uuid: string;
   pubkeyBase64: string;
+  decryptPubkeyBase64: string;
   sign: (message: Buffer) => string;
 } {
   const { privateKey, publicKey } = generateKeyPairSync("ec", {
@@ -17,12 +18,26 @@ function generateSigningIdentity(): {
   const spki = publicKey as Buffer;
   const pubkeyBytes = spki.subarray(spki.length - 65);
   const uuid = createHash("sha256").update(pubkeyBytes).digest("hex");
+
+  const { publicKey: decryptPublicKey } = generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+    publicKeyEncoding: { type: "spki", format: "der" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  const decryptSpki = decryptPublicKey as Buffer;
+  const decryptPubkeyBytes = decryptSpki.subarray(decryptSpki.length - 65);
+
   const sign = (message: Buffer): string => {
     const signer = createSign("SHA256");
     signer.update(message);
     return signer.sign(privateKey, "base64");
   };
-  return { uuid, pubkeyBase64: pubkeyBytes.toString("base64"), sign };
+  return {
+    uuid,
+    pubkeyBase64: pubkeyBytes.toString("base64"),
+    decryptPubkeyBase64: decryptPubkeyBytes.toString("base64"),
+    sign,
+  };
 }
 
 function performHandshake(
@@ -46,6 +61,7 @@ function performHandshake(
             type: "hello",
             uuid: identity.uuid,
             pubkey: identity.pubkeyBase64,
+            decrypt_pubkey: identity.decryptPubkeyBase64,
             sig: identity.sign(sigMessage),
             timestamp,
           }),

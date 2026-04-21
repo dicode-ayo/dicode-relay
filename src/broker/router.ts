@@ -127,11 +127,13 @@ export function buildBrokerRouter(
       return;
     }
 
-    // Store session
+    // Store session. session.pubkey is the ECIES recipient (daemon's decrypt
+    // pubkey from hello). ECDSA verification above uses client.pubkey (the
+    // sign key). Split identity per dicode-core#104.
     sessions.set({
       sessionId: session,
       relayUuid: relay_uuid,
-      pubkey: client.pubkey,
+      pubkey: client.decryptPubkey,
       pkceChallenge: challenge,
       provider,
       expiresAt: Date.now() + 5 * 60 * 1000,

@@ -20,6 +20,7 @@ import { testRelayOpts } from "../helpers.js";
 function generateSigningIdentity(): {
   uuid: string;
   pubkeyBase64: string;
+  decryptPubkeyBase64: string;
   sign: (message: Buffer) => string;
 } {
   const { privateKey, publicKey } = generateKeyPairSync("ec", {
@@ -27,10 +28,17 @@ function generateSigningIdentity(): {
     publicKeyEncoding: { type: "spki", format: "der" },
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
-
   const spki = publicKey as Buffer;
   const pubkeyBytes = spki.subarray(spki.length - 65);
   const uuid = createHash("sha256").update(pubkeyBytes).digest("hex");
+
+  const { publicKey: decryptPublicKey } = generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+    publicKeyEncoding: { type: "spki", format: "der" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  const decryptSpki = decryptPublicKey as Buffer;
+  const decryptPubkeyBytes = decryptSpki.subarray(decryptSpki.length - 65);
 
   const sign = (message: Buffer): string => {
     const signer = createSign("SHA256");
@@ -38,7 +46,12 @@ function generateSigningIdentity(): {
     return signer.sign(privateKey, "base64");
   };
 
-  return { uuid, pubkeyBase64: pubkeyBytes.toString("base64"), sign };
+  return {
+    uuid,
+    pubkeyBase64: pubkeyBytes.toString("base64"),
+    decryptPubkeyBase64: decryptPubkeyBytes.toString("base64"),
+    sign,
+  };
 }
 
 function buildHelloPayload(nonce: string, timestamp: number): Buffer {
@@ -89,6 +102,7 @@ async function performHandshake(port: number): Promise<{ ws: WebSocket; uuid: st
           type: "hello",
           uuid: identity.uuid,
           pubkey: identity.pubkeyBase64,
+          decrypt_pubkey: identity.decryptPubkeyBase64,
           sig,
           timestamp,
         }),

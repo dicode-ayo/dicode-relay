@@ -8,7 +8,7 @@
  *  - Ping/pong keepalive (30 s interval, 10 s timeout)
  */
 
-import { createHash, createVerify } from "node:crypto";
+import { createHash, createPublicKey, createVerify } from "node:crypto";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage } from "node:http";
@@ -46,6 +46,15 @@ export class ForwardTimeoutError extends Error {
   }
 }
 
+/**
+ * Broker protocol version advertised in the welcome message.
+ * Version 2 adds optional `decrypt_pubkey` on hello and commits the broker to
+ * using it as the ECIES recipient when present (see dicode-core#104).
+ * Daemons that require split-key OAuth delivery refuse flows when the broker
+ * reports `protocol < 2` (or omits the field).
+ */
+export const PROTOCOL_VERSION = 2;
+
 // ---------------------------------------------------------------------------
 // Client registry entry
 // ---------------------------------------------------------------------------
@@ -53,8 +62,12 @@ export class ForwardTimeoutError extends Error {
 export interface ConnectedClient {
   ws: WebSocket;
   uuid: string;
-  /** 65-byte uncompressed P-256 public key (0x04 || X || Y) */
+  /** 65-byte uncompressed P-256 public key (0x04 || X || Y). Used for ECDSA
+   *  signature verification (WSS handshake + /auth/:provider sigs). */
   pubkey: Buffer;
+  /** 65-byte uncompressed P-256 public key used by the broker as the ECIES
+   *  recipient when encrypting OAuth token deliveries (dicode-core#104). */
+  decryptPubkey: Buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,12 +296,22 @@ export class RelayServer extends EventEmitter {
         }
 
         const pubkeyBytes = Buffer.from(hello.pubkey, "base64");
-        this.clients.set(hello.uuid, { ws, uuid: hello.uuid, pubkey: pubkeyBytes });
+        // decrypt_pubkey is required; verifyHello already ran the structural +
+        // on-curve validation above.
+        const decryptPubkeyBytes = Buffer.from(hello.decrypt_pubkey, "base64");
+
+        this.clients.set(hello.uuid, {
+          ws,
+          uuid: hello.uuid,
+          pubkey: pubkeyBytes,
+          decryptPubkey: decryptPubkeyBytes,
+        });
         registeredUuid = hello.uuid;
 
         const welcome: WelcomeMessage = {
           type: "welcome",
           url: `${this.baseUrl}/u/${hello.uuid}/hooks/`,
+          protocol: PROTOCOL_VERSION,
           ...(this.brokerPubkey !== undefined ? { broker_pubkey: this.brokerPubkey } : {}),
         };
         this.sendMessage(ws, welcome);
@@ -361,6 +384,25 @@ export class RelayServer extends EventEmitter {
     }
     if (pubkeyBytes.length !== 65 || pubkeyBytes[0] !== 0x04) {
       return "pubkey must be 65 bytes starting with 0x04";
+    }
+
+    // Step 1b: Validate decrypt_pubkey structurally and as an on-curve P-256
+    // point (dicode-core#104). Required — every daemon advertises a split
+    // sign/decrypt identity. Parse failures reject the handshake.
+    let decryptBytes: Buffer;
+    try {
+      decryptBytes = Buffer.from(hello.decrypt_pubkey, "base64");
+    } catch {
+      return "invalid decrypt_pubkey encoding";
+    }
+    if (decryptBytes.length !== 65 || decryptBytes[0] !== 0x04) {
+      return "decrypt_pubkey must be 65 bytes starting with 0x04";
+    }
+    try {
+      const spkiDer = uncompressedP256ToSpki(decryptBytes);
+      createPublicKey({ key: spkiDer, format: "der", type: "spki" });
+    } catch {
+      return "decrypt_pubkey is not a valid P-256 point";
     }
 
     // Step 2: Verify uuid == hex(sha256(pubkey))
