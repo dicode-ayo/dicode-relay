@@ -13,7 +13,20 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      # Explicit PAT instead of the default GITHUB_TOKEN. GitHub deliberately
+      # blocks workflow_run cascades driven by GITHUB_TOKEN to prevent infinite
+      # recursion: when release-please creates the `v*.*.*` tag using the
+      # default token, the tag-push event does NOT trigger `release.yml`. A
+      # user-owned PAT (or a GitHub App install token) bypasses that block,
+      # so the release workflow fires naturally and publishes to npm / Docker
+      # Hub / ghcr without any manual tag-push surgery.
+      #
+      # Required scope on the PAT (fine-grained):
+      #   - Contents: Read & write
+      #   - Pull requests: Read & write
+      # Classic PAT equivalent: `repo` scope.
       - uses: googleapis/release-please-action@v4
         with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
