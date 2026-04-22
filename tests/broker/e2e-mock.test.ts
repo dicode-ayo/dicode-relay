@@ -11,7 +11,11 @@ import type { Server } from "node:http";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
-import { buildE2EMockRouter, MOCK_PROVIDER_KEY } from "../../src/broker/e2e-mock.js";
+import {
+  buildE2EMockRouter,
+  isE2EMockEnabled,
+  MOCK_PROVIDER_KEY,
+} from "../../src/broker/e2e-mock.js";
 import { SessionStore } from "../../src/broker/sessions.js";
 import { verifyDeliverySignature } from "../../src/broker/signing.js";
 import type { BrokerSigningKey } from "../../src/broker/signing.js";
@@ -19,8 +23,6 @@ import { loadBrokerSigningKey } from "../../src/broker/signing.js";
 import { RelayServer } from "../../src/relay/server.js";
 import type { RequestMessage, ResponseMessage } from "../../src/relay/protocol.js";
 import { testRelayOpts, testSessionTtlMs } from "../helpers.js";
-
-const BASE_URL = "https://relay.test.local";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -135,7 +137,7 @@ describe("E2E mock router", () => {
     brokerKey = loadBrokerSigningKey({ BROKER_SIGNING_KEY: pair.privateKey }, "/tmp");
 
     const app = express();
-    app.use(buildE2EMockRouter(relayServer, sessions, brokerKey, BASE_URL));
+    app.use(buildE2EMockRouter(relayServer, sessions, brokerKey));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -186,11 +188,31 @@ describe("E2E mock router", () => {
       expect(response.status).toBe(302);
       const location = response.headers.get("location");
       expect(location).not.toBeNull();
-      const url = new URL(location ?? "");
-      expect(url.origin + url.pathname).toBe(`${BASE_URL}/callback/mock`);
+      // Relative redirect — matches router.ts style. Parse against a dummy
+      // base so URL semantics still work.
+      const url = new URL(location ?? "", "http://dummy.local");
+      expect(url.pathname).toBe("/callback/mock");
       expect(url.searchParams.get("state")).toBe(sessionId);
       expect(url.searchParams.get("access_token")).toBe(`mock-token-${sessionId}`);
       expect(url.searchParams.get("token_type")).toBe("bearer");
+    });
+
+    it("expired session → 400", async () => {
+      const sessionId = "bb0e8400-e29b-41d4-a716-446655440000";
+      const identity = generateSigningIdentity();
+      sessions.set({
+        sessionId,
+        relayUuid: identity.uuid,
+        pubkey: identity.decryptPubkeyBytes,
+        pkceChallenge: "challenge",
+        provider: MOCK_PROVIDER_KEY,
+        expiresAt: Date.now() - 1,
+      });
+
+      const response = await fetch(
+        `http://localhost:${httpPort.toString()}/connect/mock?state=${sessionId}`,
+      );
+      expect(response.status).toBe(400);
     });
 
     it("missing state → 400", async () => {
@@ -293,6 +315,12 @@ describe("E2E mock router", () => {
       expect(forwarded).toHaveLength(1);
       expect(forwarded[0]?.path).toBe("/hooks/oauth-complete");
 
+      // The caller sees ONLY the daemon's status — the decoded daemon body
+      // must not be reflected back (unauthenticated echo reducer).
+      const respJson = (await response.json()) as Record<string, unknown>;
+      expect(respJson).toEqual({ daemon_status: 200 });
+      expect(respJson).not.toHaveProperty("daemon_body");
+
       const bodyJson = JSON.parse(
         Buffer.from(forwarded[0]?.body ?? "", "base64").toString("utf8"),
       ) as {
@@ -319,5 +347,132 @@ describe("E2E mock router", () => {
 
       ws.close();
     });
+
+    it("rejects tokens=null as 400 (typeof null === 'object' quirk)", async () => {
+      const response = await fetch(`http://localhost:${httpPort.toString()}/_test/deliver`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uuid: "a".repeat(64),
+          session_id: "x",
+          provider: "github",
+          tokens: null,
+        }),
+      });
+      expect(response.status).toBe(400);
+    });
+
+    it("rejects tokens=[] as 400 (array is not a plain object)", async () => {
+      const response = await fetch(`http://localhost:${httpPort.toString()}/_test/deliver`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uuid: "a".repeat(64),
+          session_id: "x",
+          provider: "github",
+          tokens: [],
+        }),
+      });
+      expect(response.status).toBe(400);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isE2EMockEnabled()
+// ---------------------------------------------------------------------------
+
+describe("isE2EMockEnabled", () => {
+  const savedFlag = process.env.DICODE_E2E_MOCK_PROVIDER;
+  const savedNodeEnv = process.env.NODE_ENV;
+
+  afterEach(() => {
+    if (savedFlag === undefined) {
+      delete process.env.DICODE_E2E_MOCK_PROVIDER;
+    } else {
+      process.env.DICODE_E2E_MOCK_PROVIDER = savedFlag;
+    }
+    if (savedNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = savedNodeEnv;
+    }
+  });
+
+  it("returns false when env var unset", () => {
+    delete process.env.DICODE_E2E_MOCK_PROVIDER;
+    delete process.env.NODE_ENV;
+    expect(isE2EMockEnabled()).toBe(false);
+  });
+
+  it("returns true when env var is exactly '1'", () => {
+    process.env.DICODE_E2E_MOCK_PROVIDER = "1";
+    delete process.env.NODE_ENV;
+    expect(isE2EMockEnabled()).toBe(true);
+  });
+
+  it.each(["true", "TRUE", "yes", "on", "0", " 1", "1 ", ""])(
+    "returns false for non-'1' value %p",
+    (val) => {
+      process.env.DICODE_E2E_MOCK_PROVIDER = val;
+      delete process.env.NODE_ENV;
+      expect(isE2EMockEnabled()).toBe(false);
+    },
+  );
+
+  it("returns false when NODE_ENV=production even if flag='1' (fail-closed in prod)", () => {
+    process.env.DICODE_E2E_MOCK_PROVIDER = "1";
+    process.env.NODE_ENV = "production";
+    expect(isE2EMockEnabled()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Routes absent when the e2e-mock router is NOT mounted
+// ---------------------------------------------------------------------------
+
+describe("mock routes absent when flag unset", () => {
+  let httpServer: Server;
+  let httpPort: number;
+
+  beforeEach(async () => {
+    // Simulate index.ts's behavior when DICODE_E2E_MOCK_PROVIDER is off:
+    // the e2e-mock router is simply never mounted.
+    const app = express();
+    app.use(express.json());
+    await new Promise<void>((resolve) => {
+      httpServer = app.listen(0, () => {
+        resolve();
+      });
+    });
+    const addr = httpServer.address();
+    if (addr === null || typeof addr === "string") throw new Error("No port");
+    httpPort = addr.port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close((err) => {
+        if (err !== undefined) {
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
+  });
+
+  it("GET /connect/mock → 404", async () => {
+    const response = await fetch(`http://localhost:${httpPort.toString()}/connect/mock?state=x`);
+    expect(response.status).toBe(404);
+  });
+
+  it("POST /_test/deliver → 404", async () => {
+    const response = await fetch(`http://localhost:${httpPort.toString()}/_test/deliver`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(response.status).toBe(404);
   });
 });

@@ -103,7 +103,10 @@ const brokerProviders = new Map<string, ProviderConfig>(realProviders);
 if (isE2EMockEnabled()) {
   brokerProviders.set(MOCK_PROVIDER_KEY, {
     grantKey: MOCK_PROVIDER_KEY,
-    clientId: "mock-client-id",
+    // Obviously-fake placeholder — never reaches Grant (see buildGrantMiddleware
+    // call below, which is passed realProviders only). Exists solely to satisfy
+    // the non-empty check in providers.has/buildProviderMap invariants.
+    clientId: "mock-e2e-not-a-real-credential",
     pkce: true,
     scopes: [],
   });
@@ -112,7 +115,7 @@ if (isE2EMockEnabled()) {
   );
   // Mount BEFORE Grant so /connect/mock is intercepted and Grant never sees
   // it. Also exposes /_test/deliver for low-level wire-shape testing.
-  app.use(buildE2EMockRouter(relayServer, sessions, brokerKey, serverCfg.base_url));
+  app.use(buildE2EMockRouter(relayServer, sessions, brokerKey));
 }
 
 const grantMiddleware = buildGrantMiddleware(realProviders, serverCfg.base_url);

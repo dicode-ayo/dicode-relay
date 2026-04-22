@@ -34,8 +34,18 @@ import { buildDeliverySignaturePayload, type BrokerSigningKey } from "./signing.
 /** Provider key used throughout the mock flow. */
 export const MOCK_PROVIDER_KEY = "mock";
 
-/** Whether the E2E mock provider is enabled for this process. */
+/**
+ * Whether the E2E mock provider is enabled for this process.
+ *
+ * Fails closed when `NODE_ENV=production` even if the flag is set — the
+ * mock endpoints hand out daemon-decryptable token deliveries to anyone
+ * who can reach the HTTP port, so the consequence of an accidentally
+ * enabled flag in prod is "attacker writes chosen OAuth tokens into any
+ * connected daemon's secret store." The NODE_ENV refusal converts the
+ * operator-must-remember invariant into an enforced one.
+ */
 export function isE2EMockEnabled(): boolean {
+  if (process.env.NODE_ENV === "production") return false;
   return process.env.DICODE_E2E_MOCK_PROVIDER === "1";
 }
 
@@ -57,13 +67,12 @@ export function buildE2EMockRouter(
   relay: RelayServer,
   sessions: SessionStore,
   brokerKey: BrokerSigningKey,
-  baseUrl: string,
 ): Router {
   const router: Router = makeRouter();
   router.use(json());
 
   router.get("/connect/mock", (req: Request, res: Response) => {
-    handleConnectMock(req, res, sessions, baseUrl);
+    handleConnectMock(req, res, sessions);
   });
 
   router.post("/_test/deliver", (req: Request, res: Response) => {
@@ -73,12 +82,7 @@ export function buildE2EMockRouter(
   return router;
 }
 
-function handleConnectMock(
-  req: Request,
-  res: Response,
-  sessions: SessionStore,
-  baseUrl: string,
-): void {
+function handleConnectMock(req: Request, res: Response, sessions: SessionStore): void {
   const rawState = req.query.state;
   const state = Array.isArray(rawState) ? rawState[0] : rawState;
   if (typeof state !== "string" || state === "") {
@@ -95,14 +99,22 @@ function handleConnectMock(
     res.status(400).send("session is not for mock provider");
     return;
   }
+  if (session.expiresAt <= Date.now()) {
+    res.status(400).send("session expired");
+    return;
+  }
 
-  const callbackUrl =
-    `${baseUrl}/callback/${MOCK_PROVIDER_KEY}` +
+  const callbackPath =
+    `/callback/${MOCK_PROVIDER_KEY}` +
     `?state=${encodeURIComponent(state)}` +
     `&access_token=${encodeURIComponent(`mock-token-${state}`)}` +
     `&token_type=bearer`;
   res.setHeader("Referrer-Policy", "no-referrer");
-  res.redirect(302, callbackUrl);
+  res.redirect(302, callbackPath);
+}
+
+function isPlainTokensObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 async function handleDeliver(
@@ -112,7 +124,15 @@ async function handleDeliver(
   brokerKey: BrokerSigningKey,
 ): Promise<void> {
   const body = req.body as Partial<DeliverBody>;
-  if (!body.uuid || !body.session_id || !body.provider || typeof body.tokens !== "object") {
+  if (
+    typeof body.uuid !== "string" ||
+    body.uuid === "" ||
+    typeof body.session_id !== "string" ||
+    body.session_id === "" ||
+    typeof body.provider !== "string" ||
+    body.provider === "" ||
+    !isPlainTokensObject(body.tokens)
+  ) {
     res.status(400).json({ error: "uuid, session_id, provider, tokens required" });
     return;
   }
@@ -130,7 +150,8 @@ async function handleDeliver(
   try {
     encrypted = await eciesEncrypt(client.decryptPubkey, body.session_id, deliveryType, plaintext);
   } catch (e) {
-    res.status(500).json({ error: `encrypt failed: ${String(e)}` });
+    console.error("e2e-mock: encrypt failed", e);
+    res.status(500).json({ error: "encrypt failed" });
     return;
   }
 
@@ -159,11 +180,12 @@ async function handleDeliver(
       { "Content-Type": ["application/json"] },
       Buffer.from(JSON.stringify(payload)),
     );
-    res.status(200).json({
-      daemon_status: daemonResp.status,
-      daemon_body: Buffer.from(daemonResp.body, "base64").toString("utf8"),
-    });
+    // Return only the daemon's HTTP status. The body is intentionally NOT
+    // reflected back — the caller already knows what they sent and the
+    // daemon's reply may contain noisy or sensitive error context.
+    res.status(200).json({ daemon_status: daemonResp.status });
   } catch (e) {
-    res.status(502).json({ error: `forward failed: ${String(e)}` });
+    console.error("e2e-mock: forward failed", e);
+    res.status(502).json({ error: "forward failed" });
   }
 }
