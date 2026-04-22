@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.1...v0.1.2) (2026-04-22)
+
+
+### Bug Fixes
+
+* **broker:** scope json() to /_test/deliver so hook bodies aren't eaten ([#42](https://github.com/dicode-ayo/dicode-relay/issues/42)) ([f45a178](https://github.com/dicode-ayo/dicode-relay/commit/f45a1786985a5a6ff510af3ca7a527f03a39c40d))
+
 ## [0.1.1](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.0...v0.1.1) (2026-04-22)
 
 
