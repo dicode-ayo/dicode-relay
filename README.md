@@ -205,7 +205,7 @@ See [docs/providers.md](docs/providers.md) for the full ECIES decryption procedu
 - **Single-use sessions**: Sessions are deleted immediately after the token is delivered. Replay attacks require re-running the full OAuth flow.
 - **Timestamp + nonce replay prevention**: Auth requests must be within ±30 s of server time. Relay handshake nonces are tracked for 60 s.
 
-See [docs/design/oauth-broker.md](../dicode/docs/design/oauth-broker.md) for the full threat model.
+See the OAuth broker design document in the dicode-core repository for the full threat model.
 
 ---
 
@@ -214,14 +214,15 @@ See [docs/design/oauth-broker.md](../dicode/docs/design/oauth-broker.md) for the
 ### Docker (recommended)
 
 ```sh
-docker build -t dicode-relay .
 docker run -d \
   -p 5553:5553 \
   -e BASE_URL=https://relay.dicode.app \
   -e GITHUB_CLIENT_ID=xxx \
   -e GITHUB_CLIENT_SECRET=yyy \
-  dicode-relay
+  dicodeayo/dicode-relay
 ```
+
+Also available at `ghcr.io/dicode-ayo/dicode-relay` if you prefer GitHub's registry.
 
 ### Cloudflare
 
