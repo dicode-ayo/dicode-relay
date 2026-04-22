@@ -43,9 +43,14 @@ export const MOCK_PROVIDER_KEY = "mock";
  * enabled flag in prod is "attacker writes chosen OAuth tokens into any
  * connected daemon's secret store." The NODE_ENV refusal converts the
  * operator-must-remember invariant into an enforced one.
+ *
+ * The NODE_ENV match is case-insensitive and whitespace-tolerant so that
+ * oddly-capitalised or copy-pasted values like "PRODUCTION" or
+ * " production" still trip the refusal.
  */
 export function isE2EMockEnabled(): boolean {
-  if (process.env.NODE_ENV === "production") return false;
+  const nodeEnv = process.env.NODE_ENV?.trim().toLowerCase();
+  if (nodeEnv === "production") return false;
   return process.env.DICODE_E2E_MOCK_PROVIDER === "1";
 }
 

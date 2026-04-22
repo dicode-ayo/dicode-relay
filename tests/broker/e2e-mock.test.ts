@@ -425,6 +425,15 @@ describe("isE2EMockEnabled", () => {
     process.env.NODE_ENV = "production";
     expect(isE2EMockEnabled()).toBe(false);
   });
+
+  it.each(["PRODUCTION", "Production", " production", "production ", "  PRODUCTION  "])(
+    "still fails closed for oddly-cased/whitespaced NODE_ENV %p",
+    (val) => {
+      process.env.DICODE_E2E_MOCK_PROVIDER = "1";
+      process.env.NODE_ENV = val;
+      expect(isE2EMockEnabled()).toBe(false);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
