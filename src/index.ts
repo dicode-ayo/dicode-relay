@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * dicode-relay entry point.
  *
