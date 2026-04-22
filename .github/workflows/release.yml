@@ -29,6 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -36,11 +42,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from tag
+      # Dual-publish to Docker Hub (primary, user-facing) and ghcr.io
+      # (secondary, co-located with the git repo). metadata-action fans
+      # the same tag set across both images so a single build-push step
+      # pushes both.
+      - name: Extract image tags
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/dicode-ayo/dicode-relay
+          images: |
+            docker.io/dicode/dicode-relay
+            ghcr.io/dicode-ayo/dicode-relay
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -77,6 +89,8 @@ jobs:
             ## Docker image
 
             ```
+            docker pull dicode/dicode-relay:${{ steps.meta.outputs.version }}
+            # or, from GitHub's registry
             docker pull ghcr.io/dicode-ayo/dicode-relay:${{ steps.meta.outputs.version }}
             ```
 
