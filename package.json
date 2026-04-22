@@ -1,6 +1,6 @@
 {
   "name": "dicode-relay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OAuth broker + WebSocket relay server for dicode",
   "keywords": [
     "dicode",
