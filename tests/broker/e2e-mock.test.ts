@@ -485,3 +485,88 @@ describe("mock routes absent when flag unset", () => {
     expect(response.status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: the e2e-mock router must NOT globally consume JSON bodies
+// ---------------------------------------------------------------------------
+//
+// The router mounts at the app root (so /connect/mock gets intercepted
+// before Grant). Until this guard was added, `router.use(json())` caused
+// every `application/json` request — including unrelated webhook forwards
+// like /u/:uuid/hooks/* — to have its body eaten by the mock router's
+// json middleware before reaching the actual forward handler. Bodies
+// silently arrived empty downstream.
+//
+// This test mounts the e2e-mock router alongside a raw-body POST handler
+// on an unrelated path and confirms the body flows through intact with
+// Content-Type: application/json.
+
+describe("e2e-mock router body-passthrough on unrelated routes", () => {
+  let httpServer: Server;
+  let httpPort: number;
+  let relayServer: RelayServer;
+  let sessions: SessionStore;
+  let brokerKey: BrokerSigningKey;
+
+  beforeEach(async () => {
+    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.test.local" }));
+    sessions = new SessionStore(testSessionTtlMs);
+    const pair = generateKeyPairSync("ec", {
+      namedCurve: "prime256v1",
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    brokerKey = loadBrokerSigningKey({ BROKER_SIGNING_KEY: pair.privateKey }, "/tmp");
+
+    const app = express();
+    // Mount the e2e-mock router FIRST (same order as src/index.ts when the
+    // flag is on) — this is the configuration we're guarding against.
+    app.use(buildE2EMockRouter(relayServer, sessions, brokerKey));
+    // A simple downstream handler that reads the raw body — stands in for
+    // the /u/:uuid/hooks/* forward handler in src/index.ts.
+    app.post(
+      "/raw-echo",
+      express.raw({ type: "*/*", limit: "5mb" }),
+      (req: express.Request, res: express.Response) => {
+        const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+        res.status(200).json({ length: body.length, body: body.toString("utf8") });
+      },
+    );
+
+    await new Promise<void>((resolve) => {
+      httpServer = app.listen(0, () => {
+        resolve();
+      });
+    });
+    const addr = httpServer.address();
+    if (addr === null || typeof addr === "string") throw new Error("No port");
+    httpPort = addr.port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close((err) => {
+        if (err !== undefined) {
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
+    await relayServer.close();
+    sessions.clear();
+  });
+
+  it("application/json POST body on an unrelated route reaches the downstream raw handler", async () => {
+    const payload = JSON.stringify({ hello: "world" });
+    const response = await fetch(`http://localhost:${httpPort.toString()}/raw-echo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+    expect(response.status).toBe(200);
+    const seen = (await response.json()) as { length: number; body: string };
+    expect(seen.length).toBe(payload.length);
+    expect(seen.body).toBe(payload);
+  });
+});
