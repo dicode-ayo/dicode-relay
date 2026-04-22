@@ -24,8 +24,8 @@ reproduced in full in the protocol spec below — do not deviate from it.
 
 ## Design document
 
-Read `/home/dr14/dicode/docs/design/oauth-broker.md` in full before writing
-any code. It contains:
+Read the OAuth broker design document in the dicode-core repository
+(`docs/design/oauth-broker.md`) in full before writing any code. It contains:
 - Architecture diagram
 - Step-by-step flow with sequence diagram
 - Full security design (ECDSA sig verification, ECIES token encryption, PKCE binding, replay prevention)
