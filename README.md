@@ -74,9 +74,11 @@ npm run dev
 ### Docker
 
 ```sh
-docker pull ghcr.io/dicode-ayo/dicode-relay:latest
-docker run -p 5553:5553 --env-file .env ghcr.io/dicode-ayo/dicode-relay:latest
+docker pull dicode/dicode-relay
+docker run -p 5553:5553 --env-file .env dicode/dicode-relay
 ```
+
+Also mirrored at `ghcr.io/dicode-ayo/dicode-relay` if you prefer to pull from GitHub's registry.
 
 ---
 
