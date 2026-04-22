@@ -19,7 +19,8 @@ import { loadConfig } from "./config.js";
 import { RelayServer } from "./relay/server.js";
 import { buildGrantMiddleware } from "./broker/grant.js";
 import { buildBrokerRouter } from "./broker/router.js";
-import { buildProviderMap } from "./broker/providers.js";
+import { MOCK_PROVIDER_KEY, buildE2EMockRouter, isE2EMockEnabled } from "./broker/e2e-mock.js";
+import { buildProviderMap, type ProviderConfig } from "./broker/providers.js";
 import { SessionStore } from "./broker/sessions.js";
 import { loadBrokerSigningKey } from "./broker/signing.js";
 import { MetricsCollector } from "./status/metrics.js";
@@ -91,13 +92,42 @@ relayServer.on("client:disconnected", (uuid: string) => {
 // OAuth broker
 // ---------------------------------------------------------------------------
 
-const providers = buildProviderMap(config);
+const realProviders = buildProviderMap(config);
 const sessions = new SessionStore(brokerCfg.session_ttl_ms);
 
-const grantMiddleware = buildGrantMiddleware(providers, serverCfg.base_url);
+// Providers passed to the broker router (session creation in /auth/:provider).
+// If the E2E mock flag is set, include "mock" here so /auth/mock is accepted.
+// Grant must NOT receive the mock entry — /connect/mock is handled by the
+// e2e-mock router, and Grant would otherwise try to dispatch it upstream.
+const brokerProviders = new Map<string, ProviderConfig>(realProviders);
+if (isE2EMockEnabled()) {
+  brokerProviders.set(MOCK_PROVIDER_KEY, {
+    grantKey: MOCK_PROVIDER_KEY,
+    // Obviously-fake placeholder — never reaches Grant (see buildGrantMiddleware
+    // call below, which is passed realProviders only). Exists solely to satisfy
+    // the non-empty check in providers.has/buildProviderMap invariants.
+    clientId: "mock-e2e-not-a-real-credential",
+    pkce: true,
+    scopes: [],
+  });
+  console.warn(
+    "broker: DICODE_E2E_MOCK_PROVIDER enabled — mock provider registered. DO NOT USE IN PRODUCTION.",
+  );
+  // Mount BEFORE Grant so /connect/mock is intercepted and Grant never sees
+  // it. Also exposes /_test/deliver for low-level wire-shape testing.
+  app.use(buildE2EMockRouter(relayServer, sessions, brokerKey));
+}
+
+const grantMiddleware = buildGrantMiddleware(realProviders, serverCfg.base_url);
 app.use(grantMiddleware);
 app.use(
-  buildBrokerRouter(relayServer, sessions, providers, relayCfg.timestamp_tolerance_s, brokerKey),
+  buildBrokerRouter(
+    relayServer,
+    sessions,
+    brokerProviders,
+    relayCfg.timestamp_tolerance_s,
+    brokerKey,
+  ),
 );
 
 // ---------------------------------------------------------------------------
@@ -179,7 +209,7 @@ app.get("/health", (_req, res) => {
 httpServer.listen(serverCfg.port, () => {
   console.log(`dicode-relay listening on port ${String(serverCfg.port)}`);
   console.log(`Base URL: ${serverCfg.base_url}`);
-  console.log(`Providers: ${[...providers.keys()].join(", ") || "(none configured)"}`);
+  console.log(`Providers: ${[...brokerProviders.keys()].join(", ") || "(none configured)"}`);
 });
 
 // Graceful shutdown
