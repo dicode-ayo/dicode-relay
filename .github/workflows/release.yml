@@ -51,7 +51,7 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: |
-            docker.io/dicode/dicode-relay
+            docker.io/dicodeayo/dicode-relay
             ghcr.io/dicode-ayo/dicode-relay
           tags: |
             type=semver,pattern={{version}}
@@ -89,7 +89,7 @@ jobs:
             ## Docker image
 
             ```
-            docker pull dicode/dicode-relay:${{ steps.meta.outputs.version }}
+            docker pull dicodeayo/dicode-relay:${{ steps.meta.outputs.version }}
             # or, from GitHub's registry
             docker pull ghcr.io/dicode-ayo/dicode-relay:${{ steps.meta.outputs.version }}
             ```
