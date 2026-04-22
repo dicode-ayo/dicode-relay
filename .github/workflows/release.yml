@@ -19,7 +19,7 @@ jobs:
       - run: npm run test:coverage
       - run: npm run build
 
-  publish:
+  publish-docker:
     needs: ci
     runs-on: ubuntu-latest
     permissions:
@@ -60,8 +60,37 @@ jobs:
         with:
           generate_release_notes: true
           body: |
+            ## Install
+
+            ```
+            npx dicode-relay
+            # or
+            npm install -g dicode-relay
+            ```
+
             ## Docker image
 
             ```
             docker pull ghcr.io/dicode-ayo/dicode-relay:${{ github.ref_name }}
             ```
+
+  publish-npm:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - run: npm run build
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

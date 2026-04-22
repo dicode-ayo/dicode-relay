@@ -45,10 +45,25 @@ A production-ready TypeScript/Node.js service that combines an OAuth broker and 
 
 ---
 
-## Quick start
+## Install & run
+
+The fastest path — no clone, no Node setup beyond a recent Node:
 
 ```sh
-git clone https://github.com/dicode/dicode-relay
+npx dicode-relay
+# or install globally
+npm install -g dicode-relay && dicode-relay
+```
+
+Configuration is read from `relay.yaml` (or `--config` / `$RELAY_CONFIG`). With
+no file, the process falls back to `process.env`, so for a quick local run
+export `BASE_URL` + at least one provider's `CLIENT_ID` / `CLIENT_SECRET` and
+go.
+
+### From source
+
+```sh
+git clone https://github.com/dicode-ayo/dicode-relay
 cd dicode-relay
 cp .env.example .env
 # Edit .env: set BASE_URL and at least one provider's CLIENT_ID/SECRET
@@ -56,11 +71,11 @@ npm install
 npm run dev
 ```
 
-For production, build and run with Docker:
+### Docker
 
 ```sh
-docker build -t dicode-relay .
-docker run -p 5553:5553 --env-file .env dicode-relay
+docker pull ghcr.io/dicode-ayo/dicode-relay:latest
+docker run -p 5553:5553 --env-file .env ghcr.io/dicode-ayo/dicode-relay:latest
 ```
 
 ---
