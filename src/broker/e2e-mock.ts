@@ -74,13 +74,17 @@ export function buildE2EMockRouter(
   brokerKey: BrokerSigningKey,
 ): Router {
   const router: Router = makeRouter();
-  router.use(json());
 
   router.get("/connect/mock", (req: Request, res: Response) => {
     handleConnectMock(req, res, sessions);
   });
 
-  router.post("/_test/deliver", (req: Request, res: Response) => {
+  // Scope json() to this specific route. `router.use(json())` would apply
+  // to every request the router sees — and since the router is mounted at
+  // the app root (to run before Grant), it'd consume JSON bodies on
+  // unrelated routes like /u/:uuid/hooks/*, silently dropping webhook
+  // payloads that carry Content-Type: application/json.
+  router.post("/_test/deliver", json(), (req: Request, res: Response) => {
     void handleDeliver(req, res, relay, brokerKey);
   });
 
