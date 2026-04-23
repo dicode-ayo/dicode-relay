@@ -129,15 +129,21 @@ Server → Client:
 
 Client → Server:
   {
-    "type":      "hello",
-    "uuid":      "<64 lowercase hex>",   // hex(sha256(uncompressed_pubkey))
-    "pubkey":    "<base64 std>",         // 65 bytes: 0x04 || X || Y
-    "sig":       "<base64 std>",         // ECDSA P-256 ASN.1 DER over sha256(nonce_bytes || timestamp_be_uint64)
-    "timestamp": <unix seconds integer>
+    "type":           "hello",
+    "uuid":           "<64 lowercase hex>",   // hex(sha256(uncompressed_pubkey))
+    "pubkey":         "<base64 std>",         // 65 bytes: 0x04 || X || Y — ECDSA signing key
+    "decrypt_pubkey": "<base64 std>",         // 65 bytes: 0x04 || X || Y — ECIES recipient (OAuth token delivery)
+    "sig":            "<base64 std>",         // ECDSA P-256 ASN.1 DER over sha256(nonce_bytes || timestamp_be_uint64)
+    "timestamp":      <unix seconds integer>
   }
 
 Server → Client (success):
-  { "type": "welcome", "url": "wss://relay.dicode.app/u/<uuid>/hooks/" }
+  {
+    "type":          "welcome",
+    "url":           "wss://relay.dicode.app/u/<uuid>/hooks/",
+    "protocol":      2,                        // broker advertises split sign/decrypt key support
+    "broker_pubkey": "<base64 SPKI DER>"       // broker's delivery-signing key; daemons pin on first connect (TOFU)
+  }
 
 Server → Client (failure):
   { "type": "error", "message": "<reason>" }
@@ -200,7 +206,7 @@ See [docs/providers.md](docs/providers.md) for the full ECIES decryption procedu
 ## Security model
 
 - **ECDSA authentication**: Every broker auth request is signed by the daemon's P-256 identity key. The broker verifies the signature against the public key registered in the relay client registry — no API key or shared secret required.
-- **ECIES token encryption**: Tokens are encrypted with the daemon's public key before entering the relay code path. The relay server never sees plaintext tokens.
+- **ECIES token encryption**: Tokens are encrypted with the daemon's `decrypt_pubkey` (the ECIES-only half of the split sign/decrypt identity, sent on `hello`) before entering the relay code path. The relay server never sees plaintext tokens.
 - **PKCE binding**: The PKCE challenge is signed into the broker request and bound to the session. The verifier stays on the daemon and is never transmitted.
 - **Single-use sessions**: Sessions are deleted immediately after the token is delivered. Replay attacks require re-running the full OAuth flow.
 - **Timestamp + nonce replay prevention**: Auth requests must be within ±30 s of server time. Relay handshake nonces are tracked for 60 s.
