@@ -25,7 +25,15 @@ relay:
 
 broker:
   session_ttl_ms: 300000
-  signing_key_file: ""     # auto-generated if empty
+
+  # Broker signing-key file. Precedence: env BROKER_SIGNING_KEY_FILE >
+  # env BROKER_SIGNING_KEY (inline PEM) > this field > auto-generate.
+  # Use a literal path — do NOT use `${ENV_VAR}` interpolation here. If
+  # the env var is unset, interpolation silently collapses to "", skips
+  # this field, and auto-generates a fresh key on every start, rotating
+  # the broker's public key and breaking every daemon that has TOFU-pinned
+  # it. Either write the absolute path literally, or set the env var.
+  signing_key_file: ""     # empty → auto-generate at cwd/broker-signing-key.pem
 
   # OAuth providers — add your own or override defaults.
   # Each key is the Grant provider key and the dicode provider name.
