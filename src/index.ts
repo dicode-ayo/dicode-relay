@@ -59,7 +59,7 @@ if (serverCfg.tls.cert_file !== "" && serverCfg.tls.key_file !== "") {
 // Broker signing key
 // ---------------------------------------------------------------------------
 
-const brokerKey = loadBrokerSigningKey();
+const brokerKey = loadBrokerSigningKey(process.env, process.cwd(), brokerCfg.signing_key_file);
 
 // ---------------------------------------------------------------------------
 // Relay server

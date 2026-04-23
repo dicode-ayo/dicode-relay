@@ -2,10 +2,14 @@
  * Broker signing key — proves delivery envelopes were assembled by this
  * relay instance, not by a forger who knows the daemon's public key.
  *
- * Key resolution order:
+ * Key resolution order (first hit wins):
  *   1. BROKER_SIGNING_KEY_FILE env → read PEM from file
  *   2. BROKER_SIGNING_KEY env → inline PEM string
- *   3. Auto-generate to <cwd>/broker-signing-key.pem on first start
+ *   3. broker.signing_key_file from relay.yaml → read PEM from file
+ *   4. Auto-generate to <cwd>/broker-signing-key.pem on first start
+ *
+ * Env takes precedence over YAML so operators can override a baked-in
+ * config without re-rendering the file (e.g. in containers / k8s secrets).
  *
  * The key is ECDSA P-256 (same curve family as the daemon identity, but a
  * completely separate keypair). Only the relay holds the private half; the
@@ -36,12 +40,14 @@ export interface BrokerSigningKey {
 /**
  * Load or generate the broker's signing key.
  *
- * @param env  process.env (or test override)
- * @param cwd  working directory for auto-generated key fallback
+ * @param env             process.env (or test override)
+ * @param cwd             working directory for auto-generated key fallback
+ * @param signingKeyFile  `broker.signing_key_file` from relay.yaml (or "" if unset)
  */
 export function loadBrokerSigningKey(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
+  signingKeyFile = "",
 ): BrokerSigningKey {
   let pem: string;
 
@@ -49,6 +55,8 @@ export function loadBrokerSigningKey(
     pem = readFileSync(env.BROKER_SIGNING_KEY_FILE, "utf8");
   } else if (env.BROKER_SIGNING_KEY) {
     pem = env.BROKER_SIGNING_KEY;
+  } else if (signingKeyFile !== "") {
+    pem = readFileSync(signingKeyFile, "utf8");
   } else {
     const autoPath = join(cwd, AUTO_KEY_FILENAME);
     if (existsSync(autoPath)) {
