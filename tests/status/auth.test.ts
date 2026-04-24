@@ -68,4 +68,22 @@ describe("statusAuth middleware", () => {
     const body = (await res.json()) as { ok: boolean };
     expect(body.ok).toBe(true);
   });
+
+  it("rejects wrong password of different length without throwing", async () => {
+    const { port, server: s } = await startApp("secret123");
+    server = s;
+    const res = await fetch(`http://localhost:${port.toString()}/test`, {
+      headers: { authorization: basicAuthHeader("x") },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects wrong password of equal length", async () => {
+    const { port, server: s } = await startApp("secret123");
+    server = s;
+    const res = await fetch(`http://localhost:${port.toString()}/test`, {
+      headers: { authorization: basicAuthHeader("xxxxxxxxx") },
+    });
+    expect(res.status).toBe(401);
+  });
 });

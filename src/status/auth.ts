@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 import type { RequestHandler } from "express";
 
 export function statusAuth(password: string | undefined): RequestHandler {
@@ -25,7 +27,9 @@ export function statusAuth(password: string | undefined): RequestHandler {
     const colonIndex = decoded.indexOf(":");
     const providedPassword = colonIndex === -1 ? decoded : decoded.substring(colonIndex + 1);
 
-    if (providedPassword !== password) {
+    const provided = Buffer.from(providedPassword, "utf8");
+    const expected = Buffer.from(password, "utf8");
+    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
       res.status(401).json({ error: "invalid credentials" });
       return;
     }
