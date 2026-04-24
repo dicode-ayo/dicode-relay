@@ -44,6 +44,8 @@ export const ALLOWED_TOKEN_FIELDS = [
 
 type AllowedTokenField = (typeof ALLOWED_TOKEN_FIELDS)[number];
 
+const ALLOWED_TOKEN_FIELDS_SET = new Set<string>(ALLOWED_TOKEN_FIELDS);
+
 /**
  * Filter an OAuth callback's query parameters down to allowlisted token fields.
  * Exported so it can be unit-tested without spinning up an Express server.
@@ -52,8 +54,8 @@ export function filterCallbackTokenFields(
   raw: Record<string, unknown>,
 ): Partial<Record<AllowedTokenField, unknown>> {
   return Object.fromEntries(
-    Object.entries(raw).filter(([k]) => (ALLOWED_TOKEN_FIELDS as readonly string[]).includes(k)),
-  ) as Partial<Record<AllowedTokenField, unknown>>;
+    Object.entries(raw).filter(([k]) => ALLOWED_TOKEN_FIELDS_SET.has(k)),
+  );
 }
 
 /**
@@ -243,7 +245,7 @@ async function handleCallback(
   // The callback URL is attacker-reachable, so we must never ship the full
   // `req.query` — unknown params (state, session metadata, injected junk)
   // are dropped before encryption. See ALLOWED_TOKEN_FIELDS above.
-  const tokensToDeliver = filterCallbackTokenFields(req.query as Record<string, unknown>);
+  const tokensToDeliver = filterCallbackTokenFields(req.query);
 
   // Encrypt the token payload with ECIES for the daemon. The message type
   // is bound into GCM's authenticated data so the daemon can never decrypt
