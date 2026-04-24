@@ -204,63 +204,88 @@ CI runs: `npm run typecheck && npm run lint && npm run format:check && npm run t
 
 ---
 
-## Protocol specification (from PR #79 — implement exactly)
+## Protocol specification (generated from `proto/relay.proto` — protocol v3)
 
-All WebSocket messages are JSON text frames.
+As of dicode-core#195 / dicode-relay#57, the protocol schema is generated from
+a single `.proto` vendored from dicode-core into `proto/relay.proto`. See
+`proto/README.md` for the resync process. `@bufbuild/protobuf`'s `fromJson` /
+`toJson` produces wire output compatible with Go's `protojson`. The protocol
+version advertised in the welcome message is `3`; daemons refuse brokers
+advertising `< 3`.
+
+Wire frames are still JSON text, but wrapped in a oneof envelope — the variant
+key identifies the message type. Field names stay snake_case on the wire
+(`UseProtoNames: true` on the Go side; `@bufbuild/protobuf` accepts both forms
+on input).
 
 ### Relay handshake
 
 ```
 Server → Client:
-  { "type": "challenge", "nonce": "<64 lowercase hex chars>" }
+  { "challenge": { "nonce": "<64 lowercase hex chars>" } }
 
 Client → Server:
   {
-    "type":      "hello",
-    "uuid":      "<64 lowercase hex>",   // hex(sha256(uncompressed_pubkey))
-    "pubkey":    "<base64 std>",         // 65 bytes: 0x04 || X || Y
-    "sig":       "<base64 std>",         // ECDSA P-256 ASN.1 DER over sha256(nonce_bytes || timestamp_be_uint64)
-    "timestamp": <unix seconds integer>
+    "hello": {
+      "uuid":            "<64 lowercase hex>",   // hex(sha256(uncompressed_pubkey))
+      "pubkey":          "<base64 std>",         // 65 bytes: 0x04 || X || Y
+      "decrypt_pubkey":  "<base64 std>",         // 65 bytes: 0x04 || X || Y (ECIES recipient)
+      "sig":             "<base64 std>",         // ECDSA P-256 ASN.1 DER over sha256(nonce_bytes || timestamp_be_uint64)
+      "timestamp":       <unix seconds int32>
+    }
   }
 
 Server → Client (success):
-  { "type": "welcome", "url": "wss://relay.dicode.app/u/<uuid>/hooks/" }
+  {
+    "welcome": {
+      "url":            "wss://relay.dicode.app/u/<uuid>/hooks/",
+      "broker_pubkey":  "<base64 SPKI DER>",    // optional; TOFU-pinned by daemon
+      "protocol":       3
+    }
+  }
 
 Server → Client (failure):
-  { "type": "error", "message": "<reason>" }
+  { "error": { "message": "<reason>" } }
 ```
 
 **Server verification steps (implement all, reject on any failure):**
 1. Decode `pubkey` from base64 → must be exactly 65 bytes starting with `0x04`
-2. Compute `hex(sha256(pubkeyBytes))` → must equal `uuid`
-3. Verify `timestamp` is within ±30 seconds of `Date.now() / 1000`
-4. Verify `nonce` has not been seen in the last 60 seconds (NonceStore)
-5. Verify ECDSA P-256 signature: message = `sha256(nonceBytes || timestampBigEndianUint64)`
-6. Store `{ uuid → ConnectedClient }` in registry
-7. Start ping interval (30 s); close connection if pong not received within 10 s
+2. Decode `decrypt_pubkey` from base64 → must be 65 bytes, `0x04` prefix, and a valid P-256 point
+3. Compute `hex(sha256(pubkeyBytes))` → must equal `uuid`
+4. Verify `timestamp` is within ±30 seconds of `Date.now() / 1000`
+5. Verify `nonce` has not been seen in the last 60 seconds (NonceStore)
+6. Verify ECDSA P-256 signature: message = `sha256(nonceBytes || timestampBigEndianUint64)` — timestamp is widened from int32 wire → uint64 for the preimage
+7. Store `{ uuid → ConnectedClient }` in registry
+8. Start ping interval (30 s); close connection if pong not received within 10 s
 
 ### Webhook forwarding
 
 ```
 Server → Client (inbound request):
   {
-    "type":    "request",
-    "id":      "<uuidv4>",
-    "method":  "POST",
-    "path":    "/hooks/some-task",
-    "headers": { "Content-Type": ["application/json"] },
-    "body":    "<base64 encoded bytes>"
+    "request": {
+      "id":      "<uuidv4>",
+      "method":  "POST",
+      "path":    "/hooks/some-task",
+      "headers": { "Content-Type": { "values": ["application/json"] } },
+      "body":    "<base64 encoded bytes>"
+    }
   }
 
 Client → Server (response):
   {
-    "type":    "response",
-    "id":      "<same uuidv4>",
-    "status":  200,
-    "headers": { "Content-Type": ["application/json"] },
-    "body":    "<base64 encoded bytes>"
+    "response": {
+      "id":      "<same uuidv4>",
+      "status":  200,
+      "headers": { "Content-Type": { "values": ["application/json"] } },
+      "body":    "<base64 encoded bytes>"
+    }
   }
 ```
+
+`headers` is a `map<string, HeaderValues>` where `HeaderValues { values: repeated string }`
+wraps each value list. Proto3 maps cannot hold repeated values directly — the
+wrapper is why the protocol bumped from v2 to v3.
 
 The relay server holds pending requests in a `Map<id, { resolve, reject, timer }>`
 with a 30 s timeout. On timeout, respond 504 to the original HTTP caller.

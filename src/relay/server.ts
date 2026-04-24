@@ -1,5 +1,10 @@
 /**
- * RelayServer — WebSocket server implementing the dicode relay protocol (PR #79).
+ * RelayServer — WebSocket server implementing the dicode relay protocol.
+ *
+ * The wire schema is generated from `proto/relay.proto` via `buf generate`
+ * (see ./pb/relay_pb.ts). On the wire: JSON text frames whose shape matches
+ * what `@bufbuild/protobuf`'s fromJson/toJson produces for the generated
+ * ServerMessage and ClientMessage oneof envelopes.
  *
  * Responsibilities:
  *  - Challenge/response handshake with ECDSA P-256 signature verification
@@ -13,20 +18,21 @@ import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage } from "node:http";
 import { type Server } from "node:http";
+import { create, fromJson, toJson, type JsonValue } from "@bufbuild/protobuf";
 import { WebSocket, WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
 import { NonceStore } from "./nonces.js";
-import type {
-  ChallengeMessage,
-  ClientMessage,
-  ErrorMessage,
-  HelloMessage,
-  RequestMessage,
-  ResponseMessage,
-  ServerMessage,
-  WelcomeMessage,
-} from "./protocol.js";
-import { HelloMessageSchema, ResponseMessageSchema } from "./protocol.js";
+import {
+  ClientMessageSchema,
+  HeaderValuesSchema,
+  RequestSchema,
+  ServerMessageSchema,
+  type ClientMessage,
+  type Hello,
+  type Response as ResponseMessage,
+  type ServerMessage,
+} from "./pb/relay_pb.js";
+import type { ForwardResponse } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -48,12 +54,13 @@ export class ForwardTimeoutError extends Error {
 
 /**
  * Broker protocol version advertised in the welcome message.
- * Version 2 adds optional `decrypt_pubkey` on hello and commits the broker to
- * using it as the ECIES recipient when present (see dicode-core#104).
- * Daemons that require split-key OAuth delivery refuse flows when the broker
- * reports `protocol < 2` (or omits the field).
+ * Version 3 (dicode-core#195) means: generated-from-proto wire format.
+ *   - headers: map<string, HeaderValues{values: repeated string}>
+ *   - timestamp: int32 (so the JSON encoding is a number, not a quoted string)
+ *   - envelope: {"<kind>": {...}} instead of flat {"type": "...", ...}
+ * Daemons refuse connections when the broker advertises < 3.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Client registry entry
@@ -75,7 +82,7 @@ export interface ConnectedClient {
 // ---------------------------------------------------------------------------
 
 interface PendingRequest {
-  resolve: (response: ResponseMessage) => void;
+  resolve: (response: ForwardResponse) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -141,10 +148,6 @@ export class RelayServer extends EventEmitter {
   // Public API
   // ---------------------------------------------------------------------------
 
-  /**
-   * Returns the port the WebSocket server is listening on.
-   * Useful when port was set to 0 (random) in tests.
-   */
   get port(): number {
     const addr = this.wss.address();
     if (typeof addr === "string" || addr === null) {
@@ -153,10 +156,6 @@ export class RelayServer extends EventEmitter {
     return addr.port;
   }
 
-  /**
-   * Retrieve a connected client by UUID.
-   * Throws ClientNotConnectedError if not found.
-   */
   getClient(uuid: string): ConnectedClient {
     const client = this.clients.get(uuid);
     if (client === undefined) {
@@ -165,18 +164,14 @@ export class RelayServer extends EventEmitter {
     return client;
   }
 
-  /**
-   * Returns true if the given UUID is currently connected.
-   */
   hasClient(uuid: string): boolean {
     return this.clients.has(uuid);
   }
 
   /**
    * Forward an HTTP-style request to the daemon identified by `uuid`.
-   * Returns a promise that resolves with the daemon's ResponseMessage.
-   * Rejects with ForwardTimeoutError after 30 s or ClientNotConnectedError
-   * if the daemon is not connected.
+   * Rejects with ForwardTimeoutError after the configured timeout or
+   * ClientNotConnectedError if the daemon is not connected.
    */
   async forward(
     uuid: string,
@@ -184,20 +179,28 @@ export class RelayServer extends EventEmitter {
     path: string,
     headers: Record<string, string[]>,
     body: Buffer,
-  ): Promise<ResponseMessage> {
+  ): Promise<ForwardResponse> {
     const client = this.getClient(uuid);
     const id = uuidv4();
 
-    const msg: RequestMessage = {
-      type: "request",
+    // Build the generated Request. Headers map entries wrap their string
+    // arrays in HeaderValues (proto3 maps cannot hold repeated values).
+    const wireHeaders: Record<string, ReturnType<typeof create<typeof HeaderValuesSchema>>> = {};
+    for (const [k, values] of Object.entries(headers)) {
+      wireHeaders[k] = create(HeaderValuesSchema, { values });
+    }
+    const request = create(RequestSchema, {
       id,
       method,
       path,
-      headers,
+      headers: wireHeaders,
       body: body.toString("base64"),
-    };
+    });
+    const envelope = create(ServerMessageSchema, {
+      kind: { case: "request", value: request },
+    });
 
-    return new Promise<ResponseMessage>((resolve, reject) => {
+    return new Promise<ForwardResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new ForwardTimeoutError(id));
@@ -205,23 +208,18 @@ export class RelayServer extends EventEmitter {
       timer.unref();
 
       this.pending.set(id, { resolve, reject, timer });
-      this.sendMessage(client.ws, msg);
+      this.sendServerMessage(client.ws, envelope);
     });
   }
 
-  /**
-   * Close the WebSocket server and clean up all resources.
-   */
   close(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      // Cancel all pending requests
       for (const [id, pending] of this.pending) {
         clearTimeout(pending.timer);
         pending.reject(new Error("Server closing"));
         this.pending.delete(id);
       }
 
-      // Close all client connections
       for (const client of this.clients.values()) {
         client.ws.terminate();
       }
@@ -243,10 +241,12 @@ export class RelayServer extends EventEmitter {
   // ---------------------------------------------------------------------------
 
   private handleConnection(ws: WebSocket): void {
-    // Send challenge immediately
+    // Send challenge immediately.
     const nonce = randomBytes(32).toString("hex"); // 64 hex chars
-    const challenge: ChallengeMessage = { type: "challenge", nonce };
-    this.sendMessage(ws, challenge);
+    const challengeEnvelope = create(ServerMessageSchema, {
+      kind: { case: "challenge", value: { nonce } },
+    });
+    this.sendServerMessage(ws, challengeEnvelope);
 
     let registeredUuid: string | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -279,15 +279,29 @@ export class RelayServer extends EventEmitter {
         return;
       }
 
+      let envelope: ClientMessage;
+      try {
+        envelope = fromJson(ClientMessageSchema, parsed as JsonValue, {
+          ignoreUnknownFields: true,
+        });
+      } catch {
+        if (registeredUuid === null) {
+          this.sendError(ws, "expected hello message");
+          ws.close();
+        }
+        // After registration we silently drop malformed frames — same as the
+        // pre-proto behavior when ResponseMessageSchema.safeParse failed.
+        return;
+      }
+
       if (registeredUuid === null) {
-        // Expecting a hello message
-        const result = HelloMessageSchema.safeParse(parsed);
-        if (!result.success) {
+        // Expecting a hello message.
+        if (envelope.kind.case !== "hello") {
           this.sendError(ws, "expected hello message");
           ws.close();
           return;
         }
-        const hello = result.data;
+        const hello = envelope.kind.value;
         const err = this.verifyHello(hello, nonce);
         if (err !== null) {
           this.sendError(ws, err);
@@ -296,9 +310,7 @@ export class RelayServer extends EventEmitter {
         }
 
         const pubkeyBytes = Buffer.from(hello.pubkey, "base64");
-        // decrypt_pubkey is required; verifyHello already ran the structural +
-        // on-curve validation above.
-        const decryptPubkeyBytes = Buffer.from(hello.decrypt_pubkey, "base64");
+        const decryptPubkeyBytes = Buffer.from(hello.decryptPubkey, "base64");
 
         this.clients.set(hello.uuid, {
           ws,
@@ -308,16 +320,20 @@ export class RelayServer extends EventEmitter {
         });
         registeredUuid = hello.uuid;
 
-        const welcome: WelcomeMessage = {
-          type: "welcome",
-          url: `${this.baseUrl}/u/${hello.uuid}/hooks/`,
-          protocol: PROTOCOL_VERSION,
-          ...(this.brokerPubkey !== undefined ? { broker_pubkey: this.brokerPubkey } : {}),
-        };
-        this.sendMessage(ws, welcome);
+        const welcomeEnvelope = create(ServerMessageSchema, {
+          kind: {
+            case: "welcome",
+            value: {
+              url: `${this.baseUrl}/u/${hello.uuid}/hooks/`,
+              protocol: PROTOCOL_VERSION,
+              ...(this.brokerPubkey !== undefined ? { brokerPubkey: this.brokerPubkey } : {}),
+            },
+          },
+        });
+        this.sendServerMessage(ws, welcomeEnvelope);
         this.emit("client:connected", hello.uuid);
 
-        // Start keepalive
+        // Start keepalive.
         pingTimer = setInterval(() => {
           if (ws.readyState !== WebSocket.OPEN) {
             cleanup();
@@ -335,18 +351,24 @@ export class RelayServer extends EventEmitter {
         return;
       }
 
-      // Expecting a response message
-      const result = ResponseMessageSchema.safeParse(parsed);
-      if (!result.success) {
-        // Silently ignore unknown messages after registration
+      // Post-registration: expect a response.
+      if (envelope.kind.case !== "response") {
+        // Silently ignore non-response frames after registration.
         return;
       }
-      const response = result.data;
+      const response = envelope.kind.value;
+      // HTTP status sanity check — previously enforced by a Zod range (100–599),
+      // lost in the proto migration because proto3 int32 has no range. A rogue
+      // daemon emitting an out-of-range status could confuse the relay's HTTP
+      // caller. Drop rather than forward.
+      if (response.status < 100 || response.status > 599) {
+        return;
+      }
       const req = this.pending.get(response.id);
       if (req !== undefined) {
         clearTimeout(req.timer);
         this.pending.delete(response.id);
-        req.resolve(response);
+        req.resolve(this.flattenResponse(response));
       }
     });
 
@@ -374,8 +396,8 @@ export class RelayServer extends EventEmitter {
    * Verifies all fields of a hello message.
    * Returns null on success, or an error string on failure.
    */
-  private verifyHello(hello: HelloMessage, nonce: string): string | null {
-    // Step 1: Decode pubkey — must be exactly 65 bytes starting with 0x04
+  private verifyHello(hello: Hello, nonce: string): string | null {
+    // Step 1: Decode pubkey — must be exactly 65 bytes starting with 0x04.
     let pubkeyBytes: Buffer;
     try {
       pubkeyBytes = Buffer.from(hello.pubkey, "base64");
@@ -389,9 +411,12 @@ export class RelayServer extends EventEmitter {
     // Step 1b: Validate decrypt_pubkey structurally and as an on-curve P-256
     // point (dicode-core#104). Required — every daemon advertises a split
     // sign/decrypt identity. Parse failures reject the handshake.
+    if (hello.decryptPubkey === "") {
+      return "decrypt_pubkey is required";
+    }
     let decryptBytes: Buffer;
     try {
-      decryptBytes = Buffer.from(hello.decrypt_pubkey, "base64");
+      decryptBytes = Buffer.from(hello.decryptPubkey, "base64");
     } catch {
       return "invalid decrypt_pubkey encoding";
     }
@@ -405,27 +430,27 @@ export class RelayServer extends EventEmitter {
       return "decrypt_pubkey is not a valid P-256 point";
     }
 
-    // Step 2: Verify uuid == hex(sha256(pubkey))
+    // Step 2: Verify uuid == hex(sha256(pubkey)).
     const expectedUuid = createHash("sha256").update(pubkeyBytes).digest("hex");
     if (expectedUuid !== hello.uuid) {
       return "uuid does not match sha256(pubkey)";
     }
 
-    // Step 3: Verify timestamp within ±30 s
+    // Step 3: Verify timestamp within ±timestampToleranceS.
     const now = Math.floor(Date.now() / 1000);
     if (Math.abs(now - hello.timestamp) > this.timestampToleranceS) {
       return "timestamp out of range";
     }
 
-    // Step 4: Verify nonce not seen in last 60 s
+    // Step 4: Verify nonce not seen in last nonceTtlMs.
     if (this.nonces.check(nonce)) {
       return "nonce replayed";
     }
 
-    // Step 5: Verify ECDSA signature over sha256(nonce_bytes || timestamp_be_uint64)
-    // The Go client signs the raw sha256 digest with ecdsa.SignASN1, so we must
-    // use createVerify("SHA256") on the raw (nonce || timestamp) bytes — Node's
-    // createVerify("SHA256") hashes its input internally before verifying.
+    // Step 5: Verify ECDSA signature over sha256(nonce_bytes || timestamp_be_uint64).
+    // The Go client signs the raw sha256 digest with ecdsa.SignASN1 over an
+    // 8-byte big-endian timestamp — the wire int32 is widened back here so
+    // the preimage matches regardless of the smaller wire encoding.
     const nonceBytes = Buffer.from(nonce, "hex");
     const tsBytes = Buffer.allocUnsafe(8);
     tsBytes.writeBigUInt64BE(BigInt(hello.timestamp));
@@ -434,8 +459,6 @@ export class RelayServer extends EventEmitter {
     try {
       const verify = createVerify("SHA256");
       verify.update(message);
-      // Node.js accepts the raw 65-byte uncompressed key if we specify format correctly
-      // We need to wrap it in a SubjectPublicKeyInfo DER structure for P-256
       const spkiDer = uncompressedP256ToSpki(pubkeyBytes);
       const valid = verify.verify(
         { key: spkiDer, format: "der", type: "spki" },
@@ -455,15 +478,31 @@ export class RelayServer extends EventEmitter {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private sendMessage(ws: WebSocket, msg: ServerMessage | ClientMessage): void {
+  private sendServerMessage(ws: WebSocket, msg: ServerMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
+      ws.send(JSON.stringify(toJson(ServerMessageSchema, msg)));
     }
   }
 
   private sendError(ws: WebSocket, message: string): void {
-    const err: ErrorMessage = { type: "error", message };
-    this.sendMessage(ws, err);
+    const envelope = create(ServerMessageSchema, {
+      kind: { case: "error", value: { message } },
+    });
+    this.sendServerMessage(ws, envelope);
+  }
+
+  private flattenResponse(resp: ResponseMessage): ForwardResponse {
+    const headers: Record<string, string[]> = {};
+    // resp.headers is typed as Record<string, HeaderValues>; Object.entries
+    // returns [string, unknown][] under noUncheckedIndexedAccess, so we access
+    // it back through the typed record.
+    for (const k of Object.keys(resp.headers)) {
+      const hv = resp.headers[k];
+      if (hv !== undefined) {
+        headers[k] = hv.values;
+      }
+    }
+    return { status: resp.status, headers, body: resp.body };
   }
 }
 
@@ -474,18 +513,11 @@ export class RelayServer extends EventEmitter {
 /**
  * Wraps a raw 65-byte uncompressed P-256 public key into a DER-encoded
  * SubjectPublicKeyInfo structure so Node.js crypto can import it.
- *
- * SubjectPublicKeyInfo structure for EC P-256:
- *   SEQUENCE {
- *     SEQUENCE {
- *       OID 1.2.840.10045.2.1   (ecPublicKey)
- *       OID 1.2.840.10045.3.1.7 (prime256v1)
- *     }
- *     BIT STRING { 0x00, <65-byte pubkey> }
- *   }
  */
 function uncompressedP256ToSpki(pubkey: Buffer): Buffer {
-  // Fixed header for P-256 SPKI
   const header = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
   return Buffer.concat([header, pubkey]);
 }
+
+// Re-export generated types for tests and external consumers.
+export type { Request, Response } from "./pb/relay_pb.js";

@@ -1,0 +1,11 @@
+version: v2
+inputs:
+  - directory: proto
+plugins:
+  - local:
+      - node
+      - ./node_modules/@bufbuild/protoc-gen-es/bin/protoc-gen-es
+    out: src/relay/pb
+    opt:
+      - target=ts
+      - import_extension=.js

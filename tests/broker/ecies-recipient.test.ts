@@ -16,7 +16,13 @@ import { buildSignedPayload } from "../../src/broker/crypto.js";
 import type { ProviderConfig } from "../../src/broker/providers.js";
 import { SessionStore } from "../../src/broker/sessions.js";
 import { RelayServer } from "../../src/relay/server.js";
-import { testRelayOpts, testSessionTtlMs } from "../helpers.js";
+import {
+  helloEnvelope,
+  parseChallenge,
+  parseWelcome,
+  testRelayOpts,
+  testSessionTtlMs,
+} from "../helpers.js";
 
 function testProviders(): ReadonlyMap<string, ProviderConfig> {
   return new Map([
@@ -76,15 +82,16 @@ function connectDaemon(
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${relayPort.toString()}`);
     ws.once("message", (data: Buffer | string) => {
-      const challenge = JSON.parse(typeof data === "string" ? data : data.toString()) as {
-        nonce: string;
-      };
+      const challenge = parseChallenge(data);
+      if (challenge === null) {
+        reject(new Error("Expected challenge envelope"));
+        return;
+      }
       const timestamp = Math.floor(Date.now() / 1000);
       const sig = identity.sign(buildHelloPayload(challenge.nonce, timestamp));
 
       ws.send(
-        JSON.stringify({
-          type: "hello",
+        helloEnvelope({
           uuid: identity.uuid,
           pubkey: identity.pubkeyBase64,
           decrypt_pubkey: decryptPubkey.toString("base64"),
@@ -94,13 +101,10 @@ function connectDaemon(
       );
 
       ws.once("message", (data2: Buffer | string) => {
-        const welcome = JSON.parse(typeof data2 === "string" ? data2 : data2.toString()) as {
-          type: string;
-        };
-        if (welcome.type === "welcome") {
+        if (parseWelcome(data2) !== null) {
           resolve(ws);
         } else {
-          reject(new Error(`Expected welcome, got ${welcome.type}`));
+          reject(new Error(`Expected welcome envelope, got: ${data2.toString()}`));
         }
       });
     });
