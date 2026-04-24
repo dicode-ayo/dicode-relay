@@ -55,8 +55,10 @@
   },
   "dependencies": {
     "express": "^5.0.1",
+    "express-basic-auth": "^1.2.1",
     "grant": "^5.4.22",
     "js-yaml": "^4.1.1",
+    "lru-cache": "^11.3.5",
     "uuid": "^14.0.0",
     "ws": "^8.18.0",
     "zod": "^4.3.6"
