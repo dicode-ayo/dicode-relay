@@ -163,9 +163,7 @@ describe("Envelope error paths", () => {
       // would be overkill; easier to just assert the behavior against the
       // running one with a manual race.
       const raced = await Promise.race([
-        server
-          .forward(uuid, "GET", "/hooks/anything", {}, Buffer.alloc(0))
-          .then(() => "resolved"),
+        server.forward(uuid, "GET", "/hooks/anything", {}, Buffer.alloc(0)).then(() => "resolved"),
         new Promise<string>((resolve) => {
           setTimeout(() => {
             resolve("dropped");
