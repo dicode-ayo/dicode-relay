@@ -22,7 +22,22 @@ function resolveEnvVars(value: string, env: NodeJS.ProcessEnv = process.env): st
       console.warn(`config: empty \${} interpolation — likely a typo in relay.yaml`);
       return "";
     }
-    return env[name] ?? "";
+    const resolved = env[name];
+    if (resolved === undefined) {
+      // Surface unresolved env refs so operators can spot typos or missing
+      // secrets. Collapsing to "" is fine for provider credentials (empty
+      // client_id silently disables the provider), but is a footgun for
+      // fields like broker.signing_key_file where "" triggers key auto-
+      // generation and rotates the broker pubkey. Always warn; callers
+      // can still opt into empty-as-disabled by using `default:` in Zod.
+      console.warn(
+        `config: \${${name}} is unset — value resolved to empty string. ` +
+          `If this is intentional (e.g. disabling a provider), ignore; ` +
+          `otherwise set the env var or use a literal value.`,
+      );
+      return "";
+    }
+    return resolved;
   });
 }
 
