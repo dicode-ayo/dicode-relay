@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.3](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.2...v0.1.3) (2026-04-24)
+
+
+### Bug Fixes
+
+* **config:** honor broker.signing_key_file YAML field ([#50](https://github.com/dicode-ayo/dicode-relay/issues/50)) ([37b681c](https://github.com/dicode-ayo/dicode-relay/commit/37b681c905cd67bf3ca4cc0b72961ff9aeefc0b7))
+
+
+### Documentation
+
+* **readme:** update handshake examples to post-[#104](https://github.com/dicode-ayo/dicode-relay/issues/104) split-key schema ([#51](https://github.com/dicode-ayo/dicode-relay/issues/51)) ([1012e5a](https://github.com/dicode-ayo/dicode-relay/commit/1012e5ad35d78a964289f2bb954543fc19f90e23)), closes [#45](https://github.com/dicode-ayo/dicode-relay/issues/45)
+
+
+### Refactors
+
+* **relay:** generate protocol types from protobuf schema ([#57](https://github.com/dicode-ayo/dicode-relay/issues/57)) ([fe9c58e](https://github.com/dicode-ayo/dicode-relay/commit/fe9c58ea88210fe208b1f856caa50bb5e1dab7f3))
+* **status,broker:** adopt express-basic-auth and lru-cache ([#195](https://github.com/dicode-ayo/dicode-relay/issues/195)) ([#56](https://github.com/dicode-ayo/dicode-relay/issues/56)) ([1475f4a](https://github.com/dicode-ayo/dicode-relay/commit/1475f4a61cb90ddbdf4cacf7b0b76874e51864cd))
+
 ## [0.1.2](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.1...v0.1.2) (2026-04-22)
 
 
