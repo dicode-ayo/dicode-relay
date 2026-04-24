@@ -15,5 +15,6 @@ export default tseslint.config(
       "@typescript-eslint/no-explicit-any": "error",
     },
   },
-  { ignores: ["dist/", "coverage/"] },
+  // src/relay/pb/ is protoc-gen-es output — lint at the generator, not here.
+  { ignores: ["dist/", "coverage/", "src/relay/pb/"] },
 );

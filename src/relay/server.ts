@@ -357,6 +357,13 @@ export class RelayServer extends EventEmitter {
         return;
       }
       const response = envelope.kind.value;
+      // HTTP status sanity check — previously enforced by a Zod range (100–599),
+      // lost in the proto migration because proto3 int32 has no range. A rogue
+      // daemon emitting an out-of-range status could confuse the relay's HTTP
+      // caller. Drop rather than forward.
+      if (response.status < 100 || response.status > 599) {
+        return;
+      }
       const req = this.pending.get(response.id);
       if (req !== undefined) {
         clearTimeout(req.timer);
