@@ -20,6 +20,43 @@ import type { OAuthTokenDeliveryPayload } from "../relay/protocol.js";
 import { buildDeliverySignaturePayload, type BrokerSigningKey } from "./signing.js";
 
 /**
+ * Fields that may be forwarded from an OAuth callback into the encrypted
+ * token delivery payload sent to the daemon.
+ *
+ * Rationale: the callback URL is attacker-reachable — any query param an
+ * upstream provider leaves through (or an open redirect/malicious upstream
+ * injects) would otherwise be JSON-encoded, encrypted to the daemon, and
+ * stored alongside the real token. We allowlist the OAuth 2.0 response
+ * parameters from RFC 6749 §5.1 plus the standard OIDC `id_token` and
+ * Grant's `raw` convenience field (the unmodified provider response body).
+ * Everything else — including `state`, provider error fields, and any
+ * unknown keys — is dropped before encryption.
+ */
+export const ALLOWED_TOKEN_FIELDS = [
+  "access_token",
+  "refresh_token",
+  "token_type",
+  "expires_in",
+  "scope",
+  "id_token",
+  "raw",
+] as const;
+
+type AllowedTokenField = (typeof ALLOWED_TOKEN_FIELDS)[number];
+
+const ALLOWED_TOKEN_FIELDS_SET = new Set<string>(ALLOWED_TOKEN_FIELDS);
+
+/**
+ * Filter an OAuth callback's query parameters down to allowlisted token fields.
+ * Exported so it can be unit-tested without spinning up an Express server.
+ */
+export function filterCallbackTokenFields(
+  raw: Record<string, unknown>,
+): Partial<Record<AllowedTokenField, unknown>> {
+  return Object.fromEntries(Object.entries(raw).filter(([k]) => ALLOWED_TOKEN_FIELDS_SET.has(k)));
+}
+
+/**
  * Build the Express router for the OAuth broker.
  *
  * @param relay               RelayServer instance
@@ -202,12 +239,11 @@ async function handleCallback(
     return;
   }
 
-  // Build the token payload (include all grant-returned fields)
-  // Remove state from token data to avoid leaking session metadata
-  const rawTokenData = req.query as Record<string, unknown>;
-  const tokensToDeliver = Object.fromEntries(
-    Object.entries(rawTokenData).filter(([k]) => k !== "state"),
-  );
+  // Build the token payload by allowlisting known OAuth response fields.
+  // The callback URL is attacker-reachable, so we must never ship the full
+  // `req.query` — unknown params (state, session metadata, injected junk)
+  // are dropped before encryption. See ALLOWED_TOKEN_FIELDS above.
+  const tokensToDeliver = filterCallbackTokenFields(req.query);
 
   // Encrypt the token payload with ECIES for the daemon. The message type
   // is bound into GCM's authenticated data so the daemon can never decrypt
