@@ -8,7 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { RelayServer } from "../../src/relay/server.js";
 import { NonceStore } from "../../src/relay/nonces.js";
-import { testRelayOpts, testNonceTtlMs } from "../helpers.js";
+import {
+  helloEnvelope,
+  parseChallenge,
+  parseError,
+  parseWelcome,
+  testNonceTtlMs,
+  testRelayOpts,
+} from "../helpers.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,34 +71,57 @@ function connectAndGetChallenge(port: number): Promise<{ ws: WebSocket; nonce: s
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${port.toString()}`);
     ws.once("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as {
-        type: string;
-        nonce: string;
-      };
-      if (msg.type !== "challenge") {
-        reject(new Error(`Expected challenge, got: ${msg.type}`));
+      const ch = parseChallenge(data);
+      if (ch === null) {
+        reject(new Error("Expected challenge envelope"));
         return;
       }
-      resolve({ ws, nonce: msg.nonce });
+      resolve({ ws, nonce: ch.nonce });
     });
     ws.once("error", reject);
   });
 }
 
-/** Send a hello message and wait for the next message (welcome or error). */
-function sendHelloAndWait(
-  ws: WebSocket,
-  hello: object,
-): Promise<{ type: string; message?: string; url?: string }> {
+// Hello body without the envelope wrapping — matches what helloEnvelope() takes.
+interface HelloBody {
+  uuid: string;
+  pubkey: string;
+  decrypt_pubkey?: string;
+  sig: string;
+  timestamp: number;
+}
+
+// Shape we return to callers. `type` is derived from the envelope key.
+interface HandshakeReply {
+  type: "welcome" | "error";
+  message?: string | undefined;
+  url?: string | undefined;
+}
+
+/** Send a hello envelope and wait for the next message (welcome or error). */
+function sendHelloAndWait(ws: WebSocket, hello: HelloBody): Promise<HandshakeReply> {
   return new Promise((resolve, reject) => {
-    ws.send(JSON.stringify(hello));
+    ws.send(
+      helloEnvelope({
+        uuid: hello.uuid,
+        pubkey: hello.pubkey,
+        decrypt_pubkey: hello.decrypt_pubkey ?? "",
+        sig: hello.sig,
+        timestamp: hello.timestamp,
+      }),
+    );
     ws.once("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as {
-        type: string;
-        message?: string;
-        url?: string;
-      };
-      resolve(msg);
+      const w = parseWelcome(data);
+      if (w !== null) {
+        resolve({ type: "welcome", url: w.url as string | undefined });
+        return;
+      }
+      const e = parseError(data);
+      if (e !== null) {
+        resolve({ type: "error", message: e.message });
+        return;
+      }
+      reject(new Error(`unexpected envelope: ${data.toString()}`));
     });
     ws.once("error", reject);
   });
@@ -136,7 +166,6 @@ describe("Relay handshake", () => {
     const sig = identity.sign(payload);
 
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: identity.decryptPubkeyBase64,
@@ -162,7 +191,6 @@ describe("Relay handshake", () => {
 
     // Use wrong UUID (all zeros)
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: "0".repeat(64),
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: identity.decryptPubkeyBase64,
@@ -183,7 +211,6 @@ describe("Relay handshake", () => {
     const sig = identity.sign(payload);
 
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: identity.decryptPubkeyBase64,
@@ -216,7 +243,6 @@ describe("Relay handshake", () => {
     const sig = identity.sign(payload);
 
     await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: identity.decryptPubkeyBase64,
@@ -253,7 +279,6 @@ describe("Relay handshake", () => {
     // Send only 32 bytes of pubkey
     const shortPubkey = randomBytes(32).toString("base64");
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: shortPubkey,
       sig,
@@ -274,7 +299,6 @@ describe("Relay handshake", () => {
     const sig = identity.sign(wrongPayload);
 
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: identity.decryptPubkeyBase64,

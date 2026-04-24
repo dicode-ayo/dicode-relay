@@ -21,7 +21,6 @@ import { verifyDeliverySignature } from "../../src/broker/signing.js";
 import type { BrokerSigningKey } from "../../src/broker/signing.js";
 import { loadBrokerSigningKey } from "../../src/broker/signing.js";
 import { RelayServer } from "../../src/relay/server.js";
-import type { RequestMessage, ResponseMessage } from "../../src/relay/protocol.js";
 import { testRelayOpts, testSessionTtlMs } from "../helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -81,32 +80,40 @@ async function connectDaemon(
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${relayPort.toString()}`);
     ws.once("message", (data: Buffer | string) => {
-      const challenge = JSON.parse(typeof data === "string" ? data : data.toString()) as {
-        nonce: string;
-      };
+      const env = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
+        string,
+        unknown
+      >;
+      const challenge = env.challenge as { nonce: string } | undefined;
+      if (challenge === undefined) {
+        reject(new Error("Expected challenge envelope"));
+        return;
+      }
       const timestamp = Math.floor(Date.now() / 1000);
       const payload = buildHelloPayload(challenge.nonce, timestamp);
       const sig = identity.sign(payload);
 
       ws.send(
         JSON.stringify({
-          type: "hello",
-          uuid: identity.uuid,
-          pubkey: identity.pubkeyBase64,
-          decrypt_pubkey: identity.decryptPubkeyBase64,
-          sig,
-          timestamp,
+          hello: {
+            uuid: identity.uuid,
+            pubkey: identity.pubkeyBase64,
+            decrypt_pubkey: identity.decryptPubkeyBase64,
+            sig,
+            timestamp,
+          },
         }),
       );
 
       ws.once("message", (data2: Buffer | string) => {
-        const welcome = JSON.parse(typeof data2 === "string" ? data2 : data2.toString()) as {
-          type: string;
-        };
-        if (welcome.type === "welcome") {
+        const env2 = JSON.parse(typeof data2 === "string" ? data2 : data2.toString()) as Record<
+          string,
+          unknown
+        >;
+        if (env2.welcome !== undefined) {
           resolve(ws);
         } else {
-          reject(new Error(`Expected welcome, got ${welcome.type}`));
+          reject(new Error(`Expected welcome envelope, got keys=${Object.keys(env2).join(",")}`));
         }
       });
     });
@@ -279,23 +286,24 @@ describe("E2E mock router", () => {
       const ws = await connectDaemon(relayServer.port, identity);
 
       // Capture the request message that arrives at the daemon end.
-      const forwarded: RequestMessage[] = [];
+      const forwarded: { id: string; path: string; body: string }[] = [];
       ws.on("message", (data: Buffer | string) => {
-        const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
+        const env = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
           string,
           unknown
         >;
-        if (msg.type === "request") {
-          forwarded.push(msg as unknown as RequestMessage);
-          const req = msg as RequestMessage;
-          const response: ResponseMessage = {
-            type: "response",
-            id: req.id,
-            status: 200,
-            headers: {},
-            body: Buffer.from("ok").toString("base64"),
-          };
-          ws.send(JSON.stringify(response));
+        const req = env.request as { id: string; path: string; body: string } | undefined;
+        if (req !== undefined) {
+          forwarded.push(req);
+          ws.send(
+            JSON.stringify({
+              response: {
+                id: req.id,
+                status: 200,
+                body: Buffer.from("ok").toString("base64"),
+              },
+            }),
+          );
         }
       });
 

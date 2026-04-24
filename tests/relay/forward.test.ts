@@ -10,8 +10,33 @@ import {
   ForwardTimeoutError,
   RelayServer,
 } from "../../src/relay/server.js";
-import type { RequestMessage, ResponseMessage } from "../../src/relay/protocol.js";
+import type { Request } from "../../src/relay/pb/relay_pb.js";
 import { testRelayOpts } from "../helpers.js";
+
+// Test helpers for the protobuf envelope wire format. The server under test
+// emits `{request: {...}}` and expects `{response: {...}}`; headers are wrapped
+// in `{values: [...]}` per proto3 map constraints.
+
+function extractRequest(raw: Buffer | string): Request | null {
+  const msg = JSON.parse(typeof raw === "string" ? raw : raw.toString()) as Record<string, unknown>;
+  if (typeof msg.request !== "object" || msg.request === null) return null;
+  return msg.request as Request;
+}
+
+function responseEnvelope(resp: {
+  id: string;
+  status: number;
+  headers?: Record<string, string[]>;
+  body: string;
+}): string {
+  const wireHeaders: Record<string, { values: string[] }> = {};
+  for (const [k, v] of Object.entries(resp.headers ?? {})) {
+    wireHeaders[k] = { values: v };
+  }
+  return JSON.stringify({
+    response: { id: resp.id, status: resp.status, headers: wireHeaders, body: resp.body },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -84,12 +109,13 @@ async function performHandshake(port: number): Promise<{ ws: WebSocket; uuid: st
     const ws = new WebSocket(`ws://localhost:${port.toString()}`);
 
     ws.once("message", (data: Buffer | string) => {
-      const challenge = JSON.parse(typeof data === "string" ? data : data.toString()) as {
-        type: string;
-        nonce: string;
-      };
-      if (challenge.type !== "challenge") {
-        reject(new Error("Expected challenge"));
+      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
+        string,
+        unknown
+      >;
+      const challenge = msg.challenge as { nonce: string } | undefined;
+      if (challenge === undefined) {
+        reject(new Error("Expected challenge envelope"));
         return;
       }
 
@@ -99,21 +125,24 @@ async function performHandshake(port: number): Promise<{ ws: WebSocket; uuid: st
 
       ws.send(
         JSON.stringify({
-          type: "hello",
-          uuid: identity.uuid,
-          pubkey: identity.pubkeyBase64,
-          decrypt_pubkey: identity.decryptPubkeyBase64,
-          sig,
-          timestamp,
+          hello: {
+            uuid: identity.uuid,
+            pubkey: identity.pubkeyBase64,
+            decrypt_pubkey: identity.decryptPubkeyBase64,
+            sig,
+            timestamp,
+          },
         }),
       );
 
       ws.once("message", (data2: Buffer | string) => {
-        const welcome = JSON.parse(typeof data2 === "string" ? data2 : data2.toString()) as {
-          type: string;
-        };
-        if (welcome.type !== "welcome") {
-          reject(new Error(`Expected welcome, got ${welcome.type}`));
+        const welcomeEnv = JSON.parse(
+          typeof data2 === "string" ? data2 : data2.toString(),
+        ) as Record<string, unknown>;
+        if (welcomeEnv.welcome === undefined) {
+          reject(
+            new Error(`Expected welcome envelope, got keys=${Object.keys(welcomeEnv).join(",")}`),
+          );
           return;
         }
         resolve({ ws, uuid: identity.uuid });
@@ -144,24 +173,19 @@ describe("Relay forwarding", () => {
   it("forward() sends request message to correct WebSocket client", async () => {
     const { ws, uuid } = await performHandshake(port);
 
-    const receivedMessages: RequestMessage[] = [];
+    const receivedMessages: Request[] = [];
     ws.on("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
-        string,
-        unknown
-      >;
-      if (msg.type === "request") {
-        receivedMessages.push(msg as unknown as RequestMessage);
-        const req = msg as RequestMessage;
-        const response: ResponseMessage = {
-          type: "response",
+      const req = extractRequest(data);
+      if (req === null) return;
+      receivedMessages.push(req);
+      ws.send(
+        responseEnvelope({
           id: req.id,
           status: 200,
           headers: { "Content-Type": ["application/json"] },
           body: Buffer.from(JSON.stringify({ ok: true })).toString("base64"),
-        };
-        ws.send(JSON.stringify(response));
-      }
+        }),
+      );
     });
 
     const result = await server.forward(
@@ -184,21 +208,15 @@ describe("Relay forwarding", () => {
     const { ws, uuid } = await performHandshake(port);
 
     ws.on("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
-        string,
-        unknown
-      >;
-      if (msg.type === "request") {
-        const req = msg as RequestMessage;
-        const response: ResponseMessage = {
-          type: "response",
+      const req = extractRequest(data);
+      if (req === null) return;
+      ws.send(
+        responseEnvelope({
           id: req.id,
           status: 201,
-          headers: {},
           body: Buffer.from("created").toString("base64"),
-        };
-        ws.send(JSON.stringify(response));
-      }
+        }),
+      );
     });
 
     const result = await server.forward(uuid, "POST", "/hooks/test", {}, Buffer.from("body"));
@@ -251,24 +269,18 @@ describe("Relay forwarding", () => {
     const { ws, uuid } = await performHandshake(port);
 
     ws.on("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
-        string,
-        unknown
-      >;
-      if (msg.type === "request") {
-        const req = msg as RequestMessage;
-        // Respond asynchronously to test concurrency
-        setTimeout(() => {
-          const response: ResponseMessage = {
-            type: "response",
+      const req = extractRequest(data);
+      if (req === null) return;
+      // Respond asynchronously to test concurrency
+      setTimeout(() => {
+        ws.send(
+          responseEnvelope({
             id: req.id,
             status: 200,
-            headers: {},
             body: Buffer.from(req.path).toString("base64"),
-          };
-          ws.send(JSON.stringify(response));
-        }, 10);
-      }
+          }),
+        );
+      }, 10);
     });
 
     const [r1, r2] = await Promise.all([

@@ -7,7 +7,13 @@ import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:c
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { PROTOCOL_VERSION, RelayServer } from "../../src/relay/server.js";
-import { testRelayOpts } from "../helpers.js";
+import {
+  helloEnvelope,
+  parseChallenge,
+  parseError,
+  parseWelcome,
+  testRelayOpts,
+} from "../helpers.js";
 
 interface SignIdentity {
   uuid: string;
@@ -54,34 +60,58 @@ function connectAndGetChallenge(port: number): Promise<{ ws: WebSocket; nonce: s
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${port.toString()}`);
     ws.once("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as {
-        type: string;
-        nonce: string;
-      };
-      if (msg.type !== "challenge") {
-        reject(new Error(`Expected challenge, got: ${msg.type}`));
+      const ch = parseChallenge(data);
+      if (ch === null) {
+        reject(new Error("Expected challenge envelope"));
         return;
       }
-      resolve({ ws, nonce: msg.nonce });
+      resolve({ ws, nonce: ch.nonce });
     });
     ws.once("error", reject);
   });
 }
 
-function sendHelloAndWait(
-  ws: WebSocket,
-  hello: object,
-): Promise<{ type: string; message?: string; url?: string; protocol?: number }> {
+interface HelloBody {
+  uuid: string;
+  pubkey: string;
+  decrypt_pubkey?: string;
+  sig: string;
+  timestamp: number;
+}
+interface HandshakeReply {
+  type: "welcome" | "error";
+  message?: string | undefined;
+  url?: string | undefined;
+  protocol?: number | undefined;
+}
+
+function sendHelloAndWait(ws: WebSocket, hello: HelloBody): Promise<HandshakeReply> {
   return new Promise((resolve, reject) => {
-    ws.send(JSON.stringify(hello));
+    ws.send(
+      helloEnvelope({
+        uuid: hello.uuid,
+        pubkey: hello.pubkey,
+        decrypt_pubkey: hello.decrypt_pubkey ?? "",
+        sig: hello.sig,
+        timestamp: hello.timestamp,
+      }),
+    );
     ws.once("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as {
-        type: string;
-        message?: string;
-        url?: string;
-        protocol?: number;
-      };
-      resolve(msg);
+      const w = parseWelcome(data);
+      if (w !== null) {
+        resolve({
+          type: "welcome",
+          url: w.url as string | undefined,
+          protocol: w.protocol as number | undefined,
+        });
+        return;
+      }
+      const e = parseError(data);
+      if (e !== null) {
+        resolve({ type: "error", message: e.message });
+        return;
+      }
+      reject(new Error(`unexpected envelope: ${data.toString()}`));
     });
     ws.once("error", reject);
   });
@@ -99,7 +129,7 @@ function waitForClose(ws: WebSocket): Promise<void> {
   });
 }
 
-describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
+describe("Relay handshake — decrypt_pubkey + protocol v3", () => {
   let server: RelayServer;
   let port: number;
 
@@ -112,7 +142,7 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
     await server.close();
   });
 
-  it("welcome always announces protocol: 2", async () => {
+  it("welcome always announces protocol: 3", async () => {
     const identity = generateSigningIdentity();
     const decryptPubkey = generateDecryptPubkey();
     const { ws, nonce } = await connectAndGetChallenge(port);
@@ -120,7 +150,6 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
     const sig = identity.sign(buildHelloPayload(nonce, timestamp));
 
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: decryptPubkey.toString("base64"),
@@ -130,7 +159,7 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
 
     expect(response.type).toBe("welcome");
     expect(response.protocol).toBe(PROTOCOL_VERSION);
-    expect(response.protocol).toBe(2);
+    expect(response.protocol).toBe(3);
 
     ws.close();
     await waitForClose(ws);
@@ -144,7 +173,6 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
     const sig = identity.sign(buildHelloPayload(nonce, timestamp));
 
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: decryptPubkey.toString("base64"),
@@ -170,7 +198,6 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
     const sig = identity.sign(buildHelloPayload(nonce, timestamp));
 
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       sig,
@@ -191,7 +218,6 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
 
     const shortDecryptPubkey = randomBytes(32).toString("base64");
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: shortDecryptPubkey,
@@ -216,7 +242,6 @@ describe("Relay handshake — decrypt_pubkey + protocol v2", () => {
     // but not a point on P-256. createPublicKey must reject this.
     const offCurve = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 0x00)]);
     const response = await sendHelloAndWait(ws, {
-      type: "hello",
       uuid: identity.uuid,
       pubkey: identity.pubkeyBase64,
       decrypt_pubkey: offCurve.toString("base64"),

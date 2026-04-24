@@ -2,7 +2,13 @@ import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { RelayServer } from "../../src/relay/server.js";
-import { testRelayOpts } from "../helpers.js";
+import {
+  helloEnvelope,
+  parseChallenge,
+  parseError,
+  parseWelcome,
+  testRelayOpts,
+} from "../helpers.js";
 
 function generateSigningIdentity(): {
   uuid: string;
@@ -46,19 +52,15 @@ function performHandshake(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     ws.on("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString("utf8")) as {
-        type: string;
-        nonce?: string;
-      };
-      if (msg.type === "challenge" && msg.nonce !== undefined) {
-        const nonceBytes = Buffer.from(msg.nonce, "hex");
+      const ch = parseChallenge(data);
+      if (ch !== null) {
+        const nonceBytes = Buffer.from(ch.nonce, "hex");
         const timestamp = Math.floor(Date.now() / 1000);
         const tsBytes = Buffer.allocUnsafe(8);
         tsBytes.writeBigUInt64BE(BigInt(timestamp));
         const sigMessage = Buffer.concat([nonceBytes, tsBytes]);
         ws.send(
-          JSON.stringify({
-            type: "hello",
+          helloEnvelope({
             uuid: identity.uuid,
             pubkey: identity.pubkeyBase64,
             decrypt_pubkey: identity.decryptPubkeyBase64,
@@ -66,9 +68,13 @@ function performHandshake(
             timestamp,
           }),
         );
-      } else if (msg.type === "welcome") {
+        return;
+      }
+      if (parseWelcome(data) !== null) {
         resolve();
-      } else if (msg.type === "error") {
+        return;
+      }
+      if (parseError(data) !== null) {
         reject(new Error("handshake failed"));
       }
     });
