@@ -53,9 +53,7 @@ const ALLOWED_TOKEN_FIELDS_SET = new Set<string>(ALLOWED_TOKEN_FIELDS);
 export function filterCallbackTokenFields(
   raw: Record<string, unknown>,
 ): Partial<Record<AllowedTokenField, unknown>> {
-  return Object.fromEntries(
-    Object.entries(raw).filter(([k]) => ALLOWED_TOKEN_FIELDS_SET.has(k)),
-  );
+  return Object.fromEntries(Object.entries(raw).filter(([k]) => ALLOWED_TOKEN_FIELDS_SET.has(k)));
 }
 
 /**
