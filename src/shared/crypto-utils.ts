@@ -10,9 +10,10 @@
 import { Buffer } from "node:buffer";
 
 /**
- * Fixed SPKI header for ecPublicKey + prime256v1 (P-256). When concatenated
- * with a 65-byte uncompressed public key (`0x04 || X || Y`) this yields a
- * DER-encoded SubjectPublicKeyInfo Node's `node:crypto` can import.
+ * Fixed 26-byte SPKI header for ecPublicKey + prime256v1 (P-256). When
+ * concatenated with a 65-byte uncompressed public key (`0x04 || X || Y`)
+ * this yields a 91-byte DER-encoded SubjectPublicKeyInfo that Node's
+ * `node:crypto` can import via `createPublicKey({ format: "der", type: "spki" })`.
  */
 const P256_SPKI_HEADER = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
 
