@@ -22,6 +22,7 @@ import {
   randomBytes,
 } from "node:crypto";
 import { promisify } from "node:util";
+import { uncompressedP256ToSpki } from "../shared/crypto-utils.js";
 
 const hkdfAsync = promisify(hkdf);
 
@@ -72,16 +73,6 @@ export function buildSignedPayload(
 // ---------------------------------------------------------------------------
 // verifyECDSA
 // ---------------------------------------------------------------------------
-
-/**
- * Wraps a raw 65-byte uncompressed P-256 public key into a DER SubjectPublicKeyInfo.
- * Required by Node.js crypto to import raw EC keys.
- */
-function uncompressedP256ToSpki(pubkey: Buffer): Buffer {
-  // Fixed 27-byte SPKI header for ecPublicKey + prime256v1
-  const header = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
-  return Buffer.concat([header, pubkey]);
-}
 
 /**
  * Verify an ECDSA P-256 signature over `payload`.

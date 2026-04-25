@@ -1,3 +1,4 @@
+import escapeHtml from "escape-html";
 import type { StatusSnapshot } from "./metrics.js";
 
 export function buildStatusJson(snapshot: StatusSnapshot): StatusSnapshot {
@@ -18,8 +19,8 @@ export function renderStatusPage(snapshot: StatusSnapshot): string {
       : clients
           .map(
             (c) => `<tr>
-          <td title="${esc(c.uuid)}">${esc(c.uuid.substring(0, 12))}...</td>
-          <td>${esc(c.connectedDuration)}</td>
+          <td title="${escapeHtml(c.uuid)}">${escapeHtml(c.uuid.substring(0, 12))}...</td>
+          <td>${escapeHtml(c.connectedDuration)}</td>
           <td>${c.reqPerSec.toString()} <span class="peak">(${c.peakReqPerSec.toString()})</span></td>
           <td>${c.reqPerHour.toString()} <span class="peak">(${c.peakReqPerHour.toString()})</span></td>
           <td>${c.reqPerDay.toString()} <span class="peak">(${c.peakReqPerDay.toString()})</span></td>
@@ -171,12 +172,4 @@ function formatUptime(seconds: number): string {
   if (d > 0) return `${d.toString()}d ${h.toString()}h ${m.toString()}m`;
   if (h > 0) return `${h.toString()}h ${m.toString()}m ${s.toString()}s`;
   return `${m.toString()}m ${s.toString()}s`;
-}
-
-function esc(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
