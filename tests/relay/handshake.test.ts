@@ -354,4 +354,28 @@ describe("NonceStore", () => {
       vi.useRealTimers();
     }
   });
+
+  // Pins the memory ceiling promised by NonceStore's docstring. Without this
+  // a future bump of the underlying LRUCache config that drops `max` would
+  // silently regress the unbounded-memory protection that was the whole
+  // point of switching from Map+setTimeout.
+  it("size never exceeds the configured max — LRU evicts oldest", () => {
+    // Use a small max via the production max constant exposed indirectly:
+    // construct enough nonces to exceed it. We use a TTL well above the
+    // test runtime so eviction is purely LRU, not TTL.
+    const store = new NonceStore(60 * 60 * 1000);
+    const N = 100_010; // 10 over the documented 100k ceiling
+    const firstNonce = "00".repeat(32);
+    expect(store.check(firstNonce)).toBe(false);
+    for (let i = 1; i < N; i++) {
+      // Synthetic but unique 64-hex nonces; we only need `i` to be unique.
+      const n = i.toString(16).padStart(64, "0");
+      store.check(n);
+    }
+    expect(store.size).toBeLessThanOrEqual(100_000);
+    // The very first nonce must have been LRU-evicted; check() returning
+    // false again proves it is no longer tracked. (TOCTOU caveat: this
+    // also re-inserts it, but the assertion has already happened.)
+    expect(store.check(firstNonce)).toBe(false);
+  });
 });

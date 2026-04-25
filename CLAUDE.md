@@ -65,13 +65,15 @@ dicode-relay/
 │   ├── relay/
 │   │   ├── server.ts         # RelayServer class: WS handshake, client registry, forward()
 │   │   ├── protocol.ts       # Zod schemas + TypeScript types for all WS message types
-│   │   └── nonces.ts         # NonceStore: Set with per-entry 60 s TTL, O(1) lookup
-│   └── broker/
-│       ├── router.ts         # Express Router: GET /auth/:provider, GET /callback/:provider
-│       ├── grant.ts          # buildGrantConfig(providers, baseUrl) → Grant middleware
-│       ├── providers.ts      # PROVIDER_CONFIGS: per-provider env var names + Grant options
-│       ├── sessions.ts       # SessionStore: Map<sessionId, Session> with 5 min TTL
-│       └── crypto.ts         # verifyECDSA(), eciesEncrypt(), buildSignedPayload()
+│   │   └── nonces.ts         # NonceStore: lru-cache with 60 s TTL + 100k entry ceiling
+│   ├── broker/
+│   │   ├── router.ts         # Express Router: GET /auth/:provider, GET /callback/:provider
+│   │   ├── grant.ts          # buildGrantConfig(providers, baseUrl) → Grant middleware
+│   │   ├── providers.ts      # PROVIDER_CONFIGS: per-provider env var names + Grant options
+│   │   ├── sessions.ts       # SessionStore: lru-cache with 5 min TTL + 10k entry ceiling
+│   │   └── crypto.ts         # verifyECDSA(), eciesEncrypt(), buildSignedPayload()
+│   └── shared/               # ONLY for utilities used by BOTH relay/ AND broker/.
+│       └── crypto-utils.ts   # uncompressedP256ToSpki helper
 ├── tests/
 │   ├── relay/
 │   │   ├── handshake.test.ts
