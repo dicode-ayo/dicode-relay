@@ -1,5 +1,6 @@
 import type { webcrypto } from "node:crypto";
 import type { KvAdapter } from "./kv-adapter.js";
+import { buildSignedPayload } from "../shared/crypto.js";
 
 type JsonWebKey = webcrypto.JsonWebKey;
 
@@ -92,6 +93,27 @@ export class Identity {
       { name: "ECDSA", hash: "SHA-256" },
       this.signKey.privateKey,
       msg,
+    );
+    return abToB64(p1363ToDer(new Uint8Array(p1363)));
+  }
+
+  async signAuthPayload(
+    sessionId: string,
+    challenge: string,
+    provider: string,
+    ts: number,
+  ): Promise<string> {
+    const payloadBuf = buildSignedPayload(sessionId, challenge, this.uuid, provider, ts);
+    // Web Crypto's subtle.sign({hash: SHA-256}) hashes the input once internally.
+    // The broker verifies via Node's createVerify("SHA256").update(buildSignedPayload(...))
+    // which also hashes once. So passing `payloadBuf` (the 32-byte digest from buildSignedPayload)
+    // as raw bytes produces a signature over sha256(payloadBuf), matching the broker.
+    // Copy into a fresh Uint8Array to satisfy Web Crypto's strict BufferSource constraint.
+    const payload = new Uint8Array(payloadBuf);
+    const p1363 = await crypto.subtle.sign(
+      { name: "ECDSA", hash: "SHA-256" },
+      this.signKey.privateKey,
+      payload,
     );
     return abToB64(p1363ToDer(new Uint8Array(p1363)));
   }

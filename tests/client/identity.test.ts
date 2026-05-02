@@ -2,6 +2,7 @@ import { createPublicKey, createVerify } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { Identity } from "../../src/client/identity.js";
 import { MemoryKv } from "../../src/client/kv-adapter.js";
+import { buildSignedPayload, verifyECDSA } from "../../src/shared/crypto.js";
 
 describe("Identity", () => {
   it("generates and persists a P-256 keypair on first load", async () => {
@@ -65,5 +66,20 @@ describe("Identity", () => {
     // sigDerBuf is already raw DER bytes; pass without encoding argument.
     const ok = verify.verify(pubKey, sigDerBuf);
     expect(ok).toBe(true);
+  });
+
+  it("signAuthPayload signature verifies via Node's verifyECDSA (broker compat)", async () => {
+    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const sessionId = "550e8400-e29b-41d4-a716-446655440000";
+    const challenge = "abc123_-";
+    const provider = "github";
+    const ts = 1_700_000_000;
+
+    const sigDerB64 = await id.signAuthPayload(sessionId, challenge, provider, ts);
+
+    // Broker side: rebuild the signed payload, then call verifyECDSA.
+    const payload = buildSignedPayload(sessionId, challenge, id.uuid, provider, ts);
+    const pubBytes = Buffer.from(id.signPubkeyB64, "base64");
+    expect(verifyECDSA(pubBytes, payload, sigDerB64)).toBe(true);
   });
 });
