@@ -44,9 +44,12 @@ export async function dispatchRequest(
 
   let resp: Response;
   try {
-    const fetchInit: RequestInit = { method: req.method, headers };
-    if (body.length > 0) fetchInit.body = body;
-    resp = await fetch(`http://localhost:${String(ctx.localPort)}${req.path}`, fetchInit);
+    resp = await fetch(`http://localhost:${String(ctx.localPort)}${req.path}`, {
+      method: req.method,
+      headers,
+      ...(body.length > 0 ? { body } : {}),
+      signal: AbortSignal.timeout(25_000),
+    });
   } catch {
     return errorResponse(req.id, 502);
   }

@@ -282,8 +282,11 @@ const client = new RelayClient({
 await client.run();
 ```
 
-The client is environment-agnostic — pass any `KvAdapter` implementation.
-In dicode tasks, wrap `dicode.kv` from the SDK.
+The client targets Node.js 22+ and Deno (both expose `node:crypto`). It is not
+browser-compatible — `node:crypto` primitives are used for HKDF, AES-GCM decrypt,
+and broker signature verification. Pure–Web Crypto support is a follow-up; see
+the GitHub issue. Pass any `KvAdapter` implementation; in dicode tasks, wrap
+`dicode.kv` from the SDK.
 
 ---
 

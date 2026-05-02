@@ -128,10 +128,21 @@ export class RelayClient {
 
     try {
       const hr = await runHandshake(sock, this.opts.identity, this.opts.tofu);
-      // Detach the handshake message listener BEFORE registering the serve
-      // listener — prevents the handshake inbox from buffering post-handshake
-      // request frames that serve() should see.
-      detach();
+      // Detach the handshake message listener and collect any frames that
+      // arrived in the microtask gap between the welcome frame and detach().
+      // The broker may pipeline welcome + a request back-to-back; without
+      // replay those frames would be silently lost.
+      const leftover = detach();
+      if (leftover.length > 0) {
+        this.opts.log.warn("relay: replayed buffered frames at handshake→serve", {
+          count: leftover.length,
+        });
+      }
+      // Replay buffered frames BEFORE serve() registers its listener so that
+      // each frame still goes through handleFrame exactly once.
+      for (const raw of leftover) {
+        void this.handleFrame(ws, raw);
+      }
 
       Object.assign(status, {
         connected: true,
@@ -153,24 +164,32 @@ export class RelayClient {
     }
   }
 
-  private async serve(ws: WebSocket, signal?: AbortSignal): Promise<void> {
-    return new Promise((resolve, reject) => {
+  private serve(ws: WebSocket, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       const onAbort = (): void => {
         ws.terminate();
       };
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      ws.on("close", () => {
-        signal?.removeEventListener("abort", onAbort);
+      const onClose = (): void => {
+        cleanup();
         resolve();
-      });
-      ws.on("error", (err: Error) => {
-        signal?.removeEventListener("abort", onAbort);
+      };
+      const onError = (err: Error): void => {
+        cleanup();
         reject(err);
-      });
-      ws.on("message", (data: Buffer | string) => {
+      };
+      const onMessage = (data: Buffer | string): void => {
         void this.handleFrame(ws, data);
-      });
+      };
+      const cleanup = (): void => {
+        signal?.removeEventListener("abort", onAbort);
+        ws.removeListener("close", onClose);
+        ws.removeListener("error", onError);
+        ws.removeListener("message", onMessage);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      ws.on("close", onClose);
+      ws.on("error", onError);
+      ws.on("message", onMessage);
     });
   }
 
@@ -206,7 +225,7 @@ export class RelayClient {
 }
 
 /** Adapt the `ws` WebSocket to the SocketLike interface used by runHandshake. */
-function adaptWs(ws: WebSocket): { sock: SocketLike; detach: () => void } {
+function adaptWs(ws: WebSocket): { sock: SocketLike; detach: () => string[] } {
   const inbox: string[] = [];
   const waiters: ((s: string) => void)[] = [];
 
@@ -231,13 +250,13 @@ function adaptWs(ws: WebSocket): { sock: SocketLike; detach: () => void } {
           else waiters.push(r);
         }),
     },
-    detach: (): void => {
+    detach: (): string[] => {
       // Remove the handshake listener so it no longer buffers incoming frames.
-      // At this point the handshake has consumed challenge + welcome, so inbox
-      // should be empty. Any residual entries are pre-serve server frames —
-      // discard them; the server shouldn't send extra frames before we've
-      // registered our serve listener.
+      // Return any frames that arrived after the final handshake message — they
+      // are pre-serve request frames that must be replayed into handleFrame so
+      // they are not silently lost during the handshake→serve transition gap.
       ws.removeListener("message", onMessage);
+      return inbox.splice(0);
     },
   };
 }

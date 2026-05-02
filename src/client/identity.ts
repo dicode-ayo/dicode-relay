@@ -6,7 +6,7 @@ type JsonWebKey = webcrypto.JsonWebKey;
 
 const KV_KEY = "identity.v1";
 
-interface StoredIdentity {
+export interface StoredIdentity {
   sign_priv_pkcs8_b64: string;
   decrypt_priv_pkcs8_b64: string;
 }
@@ -104,10 +104,12 @@ export class Identity {
     ts: number,
   ): Promise<string> {
     const payloadBuf = buildSignedPayload(sessionId, challenge, this.uuid, provider, ts);
-    // Web Crypto's subtle.sign({hash: SHA-256}) hashes the input once internally.
-    // The broker verifies via Node's createVerify("SHA256").update(buildSignedPayload(...))
-    // which also hashes once. So passing `payloadBuf` (the 32-byte digest from buildSignedPayload)
-    // as raw bytes produces a signature over sha256(payloadBuf), matching the broker.
+    // `buildSignedPayload` returns sha256(fields) — a 32-byte digest.
+    // Web Crypto's subtle.sign({hash:"SHA-256"}) hashes its input once internally,
+    // so the resulting signature is over sha256(sha256(fields)). The broker verifies
+    // via Node's createVerify("SHA256").update(buildSignedPayload(...)) which also
+    // hashes the digest once, giving the same sha256(sha256(fields)) preimage.
+    // This matches the Go reference (pkg/relay/oauth.go SignAuthPayload).
     // Copy into a fresh Uint8Array to satisfy Web Crypto's strict BufferSource constraint.
     const payload = new Uint8Array(payloadBuf);
     const p1363 = await crypto.subtle.sign(
