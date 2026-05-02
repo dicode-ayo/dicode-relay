@@ -258,6 +258,35 @@ server {
 
 ---
 
+## Client library
+
+This package also publishes a TypeScript/Web-Crypto client library at
+`dicode-relay/client`, used by dicode-core's buildin tasks to maintain
+the WSS tunnel and run OAuth flows. Example:
+
+```ts
+import { RelayClient, Identity, TofuStore, MemoryKv } from "dicode-relay/client";
+
+const kv = new MemoryKv(); // or your own KvAdapter
+const identity = await Identity.loadOrGenerate(kv);
+const tofu     = new TofuStore(kv);
+
+const client = new RelayClient({
+  serverURL: "wss://relay.example/",
+  localPort: 8080,
+  identity, tofu,
+  log: console,
+  onStatus: (s) => console.log("status:", s),
+});
+
+await client.run();
+```
+
+The client is environment-agnostic — pass any `KvAdapter` implementation.
+In dicode tasks, wrap `dicode.kv` from the SDK.
+
+---
+
 ## Contributing
 
 ```sh
