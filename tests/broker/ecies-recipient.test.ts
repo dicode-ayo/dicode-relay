@@ -12,7 +12,7 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { buildBrokerRouter } from "../../src/broker/router.js";
-import { buildSignedPayload } from "../../src/broker/crypto.js";
+import { buildSignedPayload } from "../../src/shared/crypto.js";
 import type { ProviderConfig } from "../../src/broker/providers.js";
 import { SessionStore } from "../../src/broker/sessions.js";
 import { RelayServer } from "../../src/relay/server.js";
