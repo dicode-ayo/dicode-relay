@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import { create } from "@bufbuild/protobuf";
 import { HeaderValuesSchema, ResponseSchema } from "../relay/pb/relay_pb.js";
 import type { RequestMessage, ResponseMessage } from "../shared/protocol.js";
@@ -16,6 +17,11 @@ const HOP_BY_HOP = new Set([
   "set-cookie", // sensitive — never forward to inbound caller
 ]);
 
+// Headers we refuse to forward from the relay to the local daemon. A
+// compromised relay could otherwise inject forged credentials targeting
+// daemon-side handlers. Match case-insensitively.
+const STRIP_INBOUND = new Set(["authorization", "cookie", "x-api-key"]);
+
 export interface ForwardCtx {
   localPort: number;
   daemonUUID: string;
@@ -25,8 +31,21 @@ export async function dispatchRequest(
   req: RequestMessage,
   ctx: ForwardCtx,
 ): Promise<ResponseMessage> {
-  // Allow-list paths to limit blast radius if relay is compromised.
-  if (!req.path.startsWith("/hooks/") && req.path !== "/dicode.js") {
+  // Normalise the path before allow-list checks to prevent path-traversal
+  // bypasses via ".." segments or percent-encoded variants.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(req.path);
+  } catch {
+    return errorResponse(req.id, 400);
+  }
+  const normalised = posix.normalize(decoded);
+  // If normalisation changed anything (e.g. ".." collapsed, "//" folded, or
+  // the raw path contained percent-encoded sequences) — reject.
+  if (normalised !== decoded || normalised !== req.path) {
+    return errorResponse(req.id, 403);
+  }
+  if (!normalised.startsWith("/hooks/") && normalised !== "/dicode.js") {
     return errorResponse(req.id, 403);
   }
 
@@ -37,7 +56,9 @@ export async function dispatchRequest(
   // Build outgoing headers; drop inbound X-Relay-Base before re-stamping.
   const headers = new Headers();
   for (const [k, hv] of Object.entries(req.headers)) {
-    if (k.toLowerCase() === "x-relay-base") continue;
+    const lk = k.toLowerCase();
+    if (lk === "x-relay-base") continue; // re-stamped below
+    if (STRIP_INBOUND.has(lk)) continue; // never forward credential headers
     for (const v of hv.values) headers.append(k, v);
   }
   headers.set("X-Relay-Base", `/u/${ctx.daemonUUID}`);

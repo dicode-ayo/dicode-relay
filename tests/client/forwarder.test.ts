@@ -110,4 +110,77 @@ describe("dispatchRequest", () => {
     });
     expect(resp.status).toBe(502);
   });
+
+  // Fix 1: path traversal tests
+  it("rejects path traversal via ..", async () => {
+    const resp = await dispatchRequest(buildReq({ path: "/hooks/../admin" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(403);
+  });
+
+  it("rejects percent-encoded traversal", async () => {
+    const resp = await dispatchRequest(buildReq({ path: "/hooks/%2e%2e/secret" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(403);
+  });
+
+  it("rejects malformed percent-encoding (decodeURIComponent throws)", async () => {
+    const resp = await dispatchRequest(buildReq({ path: "/hooks/%ZZ" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(400);
+  });
+
+  it("rejects double-slash path normalisation", async () => {
+    // path.posix.normalize("/hooks//foo") → "/hooks/foo" which differs from input
+    const resp = await dispatchRequest(buildReq({ path: "/hooks//foo" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(403);
+  });
+
+  // Fix 2: credential header stripping test
+  it("strips Authorization, Cookie, X-Api-Key from forwarded requests", async () => {
+    const http = await import("node:http");
+    let receivedAuth: string | undefined;
+    let receivedCookie: string | undefined;
+    let receivedApiKey: string | undefined;
+    const srv = http.createServer((reqIn, resOut) => {
+      receivedAuth = reqIn.headers.authorization;
+      receivedCookie = reqIn.headers.cookie;
+      receivedApiKey = reqIn.headers["x-api-key"] as string | undefined;
+      resOut.writeHead(200);
+      resOut.end("ok");
+    });
+    await new Promise<void>((r) => {
+      srv.listen(0, () => {
+        r();
+      });
+    });
+    const port = (srv.address() as { port: number }).port;
+
+    await dispatchRequest(
+      buildReq({
+        path: "/hooks/x",
+        headers: {
+          Authorization: { values: ["Bearer secret"] },
+          Cookie: { values: ["session=abc"] },
+          "X-Api-Key": { values: ["k1"] },
+          "Content-Type": { values: ["text/plain"] },
+        },
+      }),
+      { localPort: port, daemonUUID: "abc" },
+    );
+    srv.close();
+
+    expect(receivedAuth).toBeUndefined();
+    expect(receivedCookie).toBeUndefined();
+    expect(receivedApiKey).toBeUndefined();
+  });
 });
