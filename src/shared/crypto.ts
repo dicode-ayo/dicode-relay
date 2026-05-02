@@ -21,6 +21,7 @@ import {
   hkdf,
   randomBytes,
 } from "node:crypto";
+import type { webcrypto } from "node:crypto";
 import { promisify } from "node:util";
 
 const hkdfAsync = promisify(hkdf);
@@ -216,5 +217,54 @@ export async function eciesDecrypt(
   decipher.setAAD(Buffer.from(messageType, "utf8"));
   decipher.setAuthTag(authTag);
 
+  return Buffer.concat([decipher.update(ct), decipher.final()]);
+}
+
+// ---------------------------------------------------------------------------
+// ECIES decryption — Web Crypto variant (relay-client / Identity class)
+// ---------------------------------------------------------------------------
+
+/**
+ * Decrypt an ECIES payload using a Web Crypto ECDH private key.
+ *
+ * Distinct from the existing eciesDecrypt: that one takes a Node `createECDH`
+ * instance, this one takes a Web Crypto `CryptoKey` so it can be called by the
+ * relay-client `Identity` class (which stores keys via Web Crypto).
+ *
+ * Functionally identical: same HKDF info, same AAD binding, same auth-tag
+ * convention as eciesEncrypt.
+ */
+export async function eciesDecryptWebCrypto(
+  decryptKey: webcrypto.CryptoKey,
+  sessionId: string,
+  messageType: EciesMessageType,
+  payload: EciesPayload,
+): Promise<Buffer> {
+  const ephPubBytes = Buffer.from(payload.ephemeralPubkey, "base64");
+
+  // Web Crypto ECDH: import ephemeral pubkey, derive 32-byte secret.
+  const ephPub = await crypto.subtle.importKey(
+    "raw",
+    ephPubBytes,
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    [],
+  );
+  const sharedSecret = Buffer.from(
+    await crypto.subtle.deriveBits({ name: "ECDH", public: ephPub }, decryptKey, 256),
+  );
+
+  const encKey = Buffer.from(
+    await hkdfAsync("sha256", sharedSecret, Buffer.from(sessionId), "dicode-oauth-token", 32),
+  );
+
+  const iv = Buffer.from(payload.nonce, "base64");
+  const ciphertextWithTag = Buffer.from(payload.ciphertext, "base64");
+  const ct = ciphertextWithTag.subarray(0, ciphertextWithTag.length - 16);
+  const authTag = ciphertextWithTag.subarray(ciphertextWithTag.length - 16);
+
+  const decipher = createDecipheriv("aes-256-gcm", encKey, iv);
+  decipher.setAAD(Buffer.from(messageType, "utf8"));
+  decipher.setAuthTag(authTag);
   return Buffer.concat([decipher.update(ct), decipher.final()]);
 }
