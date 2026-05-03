@@ -3,7 +3,6 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Identity } from "../../src/client/identity.js";
-import { MemoryKv } from "../../src/client/kv-adapter.js";
 import { eciesEncrypt, eciesDecryptWebCrypto } from "../../src/shared/crypto.js";
 import {
   buildDeliverySignaturePayload,
@@ -13,7 +12,7 @@ import {
 
 describe("ECIES round-trip with Web Crypto identity", () => {
   it("decrypts an envelope produced by the broker's eciesEncrypt", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
     const plaintext = Buffer.from(JSON.stringify({ access_token: "secret-abc" }));
 
@@ -36,7 +35,7 @@ describe("ECIES round-trip with Web Crypto identity", () => {
   });
 
   it("rejects when sessionId differs (HKDF salt mismatch)", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const env = await eciesEncrypt(
       Buffer.from(id.decryptPubkeyB64, "base64"),
       "good-session",
@@ -49,7 +48,7 @@ describe("ECIES round-trip with Web Crypto identity", () => {
   });
 
   it("rejects when messageType differs (AAD mismatch)", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const env = await eciesEncrypt(
       Buffer.from(id.decryptPubkeyB64, "base64"),
       "session",

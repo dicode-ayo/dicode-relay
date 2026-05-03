@@ -7,11 +7,10 @@ import { join } from "node:path";
 
 import { RelayServer } from "../../src/relay/server.js";
 import { Identity } from "../../src/client/identity.js";
-import { MemoryKv } from "../../src/client/kv-adapter.js";
-import { TofuStore } from "../../src/client/tofu.js";
 import { RelayClient } from "../../src/client/client.js";
 import { loadBrokerSigningKey } from "../../src/shared/signing.js";
 import { testRelayOpts } from "../helpers.js";
+import type { TofuResult } from "../../src/client/handshake.js";
 
 function silentLogger() {
   const noop = (_msg: string, _meta?: Record<string, unknown>): void => {
@@ -53,15 +52,22 @@ describe("RelayClient end-to-end", () => {
     );
     const relayPort = relay.port;
 
-    // 3. Build a RelayClient.
-    const id = await Identity.loadOrGenerate(new MemoryKv());
-    const tofu = new TofuStore(new MemoryKv());
+    // 3. Build a RelayClient with an inline TOFU callback.
+    const id = await Identity.generate();
+    let pinnedBrokerKey: string | null = null;
+    const tofuCheckAndPin = (brokerPubkeyB64: string): Promise<TofuResult> => {
+      if (pinnedBrokerKey === null) {
+        pinnedBrokerKey = brokerPubkeyB64;
+        return Promise.resolve("new");
+      }
+      return Promise.resolve(pinnedBrokerKey === brokerPubkeyB64 ? "match" : "mismatch");
+    };
     const ac = new AbortController();
     const client = new RelayClient({
       serverURL: `ws://127.0.0.1:${String(relayPort)}/`,
       localPort,
       identity: id,
-      tofu,
+      tofuCheckAndPin,
       log: silentLogger(),
     });
     const runPromise = client.run(ac.signal);

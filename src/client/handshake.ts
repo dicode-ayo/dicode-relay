@@ -1,9 +1,10 @@
 import { create, fromJson, toJson, type JsonValue } from "@bufbuild/protobuf";
 import { ClientMessageSchema, HelloSchema, ServerMessageSchema } from "../relay/pb/relay_pb.js";
 import type { Identity } from "./identity.js";
-import type { TofuStore } from "./tofu.js";
 
 const BROKER_PROTOCOL_MIN = 3;
+
+export type TofuResult = "new" | "match" | "mismatch";
 
 export interface SocketLike {
   send: (data: string) => void;
@@ -18,7 +19,7 @@ export interface HandshakeResult {
 export async function runHandshake(
   ws: SocketLike,
   identity: Identity,
-  tofu: TofuStore,
+  tofuCheckAndPin: (brokerPubkeyB64: string) => Promise<TofuResult>,
 ): Promise<HandshakeResult> {
   // 1. Receive challenge.
   const challengeRaw = await ws.recv();
@@ -67,7 +68,7 @@ export async function runHandshake(
   }
 
   if (welcome.brokerPubkey) {
-    const res = await tofu.checkAndPin(welcome.brokerPubkey);
+    const res = await tofuCheckAndPin(welcome.brokerPubkey);
     if (res === "mismatch") {
       throw new Error(
         "relay: broker pubkey changed — run `dicode relay trust-broker --yes` to accept the new key",

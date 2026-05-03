@@ -1,10 +1,7 @@
 import type { webcrypto } from "node:crypto";
-import type { KvAdapter } from "./kv-adapter.js";
 import { buildSignedPayload } from "../shared/crypto.js";
 
 type JsonWebKey = webcrypto.JsonWebKey;
-
-const KV_KEY = "identity.v1";
 
 export interface StoredIdentity {
   sign_priv_pkcs8_b64: string;
@@ -26,10 +23,9 @@ export class Identity {
     public readonly decryptPubkeyB64: string,
   ) {}
 
-  static async loadOrGenerate(kv: KvAdapter): Promise<Identity> {
-    const stored = await kv.get<StoredIdentity>(KV_KEY);
-    if (stored) return Identity.fromStored(stored);
-
+  /** Generate a fresh split P-256 identity. The caller is responsible for
+   *  persisting the result of `export()` if they want a stable UUID across runs. */
+  static async generate(): Promise<Identity> {
     const sign = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
       "sign",
       "verify",
@@ -38,16 +34,27 @@ export class Identity {
       "deriveBits",
     ]);
 
-    const fresh: StoredIdentity = {
+    const stored: StoredIdentity = {
       sign_priv_pkcs8_b64: abToB64(await crypto.subtle.exportKey("pkcs8", sign.privateKey)),
       decrypt_priv_pkcs8_b64: abToB64(await crypto.subtle.exportKey("pkcs8", decrypt.privateKey)),
     };
-    await kv.set(KV_KEY, fresh);
-    return Identity.fromStored(fresh);
+    return Identity.fromStored(stored);
   }
 
+  /** Import a previously-exported identity. */
   static async import(stored: StoredIdentity): Promise<Identity> {
     return Identity.fromStored(stored);
+  }
+
+  /** Export PKCS8-encoded private keys for persistence. The caller stores
+   *  this object via whatever mechanism (kv, file, env, etc.). */
+  async export(): Promise<StoredIdentity> {
+    return {
+      sign_priv_pkcs8_b64: abToB64(await crypto.subtle.exportKey("pkcs8", this.signKey.privateKey)),
+      decrypt_priv_pkcs8_b64: abToB64(
+        await crypto.subtle.exportKey("pkcs8", this.decryptKey.privateKey),
+      ),
+    };
   }
 
   private static async fromStored(s: StoredIdentity): Promise<Identity> {

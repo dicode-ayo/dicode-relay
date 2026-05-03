@@ -1,29 +1,27 @@
 import { createPublicKey, createVerify } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { Identity } from "../../src/client/identity.js";
-import { MemoryKv } from "../../src/client/kv-adapter.js";
 import { buildSignedPayload, verifyECDSA } from "../../src/shared/crypto.js";
 
 describe("Identity", () => {
-  it("generates and persists a P-256 keypair on first load", async () => {
-    const kv = new MemoryKv();
-    const id = await Identity.loadOrGenerate(kv);
+  it("generates a P-256 keypair with valid uuid/pubkeys", async () => {
+    const id = await Identity.generate();
     expect(id.uuid).toMatch(/^[0-9a-f]{64}$/);
     expect(id.signPubkeyB64).toBeTruthy();
     expect(id.decryptPubkeyB64).toBeTruthy();
   });
 
-  it("returns the same identity on second load", async () => {
-    const kv = new MemoryKv();
-    const a = await Identity.loadOrGenerate(kv);
-    const b = await Identity.loadOrGenerate(kv);
+  it("round-trips export → import preserving uuid and pubkeys", async () => {
+    const a = await Identity.generate();
+    const stored = await a.export();
+    const b = await Identity.import(stored);
     expect(b.uuid).toBe(a.uuid);
     expect(b.signPubkeyB64).toBe(a.signPubkeyB64);
+    expect(b.decryptPubkeyB64).toBe(a.decryptPubkeyB64);
   });
 
   it("derives uuid as hex(sha256(uncompressed sign pubkey))", async () => {
-    const kv = new MemoryKv();
-    const id = await Identity.loadOrGenerate(kv);
+    const id = await Identity.generate();
     const pkBytes = Uint8Array.from(Buffer.from(id.signPubkeyB64, "base64"));
     expect(pkBytes.length).toBe(65);
     expect(pkBytes[0]).toBe(0x04);
@@ -33,8 +31,7 @@ describe("Identity", () => {
   });
 
   it("signs a challenge in DER format that round-trips Web Crypto verify", async () => {
-    const kv = new MemoryKv();
-    const id = await Identity.loadOrGenerate(kv);
+    const id = await Identity.generate();
     const nonce = "00".repeat(32);
     const ts = 1_700_000_000;
     const sigDerB64 = await id.signChallenge(nonce, ts);
@@ -42,8 +39,7 @@ describe("Identity", () => {
   });
 
   it("signature verifies via Node's createVerify (broker compatibility)", async () => {
-    const kv = new MemoryKv();
-    const id = await Identity.loadOrGenerate(kv);
+    const id = await Identity.generate();
     const nonce = "11".repeat(32);
     const ts = 1_700_000_000;
     const sigDerB64 = await id.signChallenge(nonce, ts);
@@ -69,7 +65,7 @@ describe("Identity", () => {
   });
 
   it("signAuthPayload signature verifies via Node's verifyECDSA (broker compat)", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
     const challenge = "abc123_-";
     const provider = "github";

@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 import { create, toJson } from "@bufbuild/protobuf";
 import { ServerMessageSchema } from "../../src/relay/pb/relay_pb.js";
 import { Identity } from "../../src/client/identity.js";
-import { MemoryKv } from "../../src/client/kv-adapter.js";
-import { TofuStore } from "../../src/client/tofu.js";
-import { runHandshake, type SocketLike } from "../../src/client/handshake.js";
+import { runHandshake, type SocketLike, type TofuResult } from "../../src/client/handshake.js";
 
 class MockSocket implements SocketLike {
   sent: string[] = [];
@@ -56,10 +54,10 @@ function errorJson(message: string): string {
 describe("runHandshake", () => {
   it("sends hello after challenge, returns welcome url + brokerPubkey", async () => {
     const ws = new MockSocket();
-    const id = await Identity.loadOrGenerate(new MemoryKv());
-    const tofu = new TofuStore(new MemoryKv());
+    const id = await Identity.generate();
+    const tofuCheckAndPin = (_: string): Promise<TofuResult> => Promise.resolve("new");
 
-    const p = runHandshake(ws, id, tofu);
+    const p = runHandshake(ws, id, tofuCheckAndPin);
     ws.inject(challengeJson("00".repeat(32)));
     // Yield once so the handshake can send hello before we inject welcome.
     await Promise.resolve();
@@ -95,12 +93,10 @@ describe("runHandshake", () => {
 
   it("rejects on TOFU mismatch", async () => {
     const ws = new MockSocket();
-    const id = await Identity.loadOrGenerate(new MemoryKv());
-    const kv = new MemoryKv();
-    await kv.set("tofu.broker_pubkey", "ORIGINAL_KEY");
-    const tofu = new TofuStore(kv);
+    const id = await Identity.generate();
+    const tofuCheckAndPin = (_: string): Promise<TofuResult> => Promise.resolve("mismatch");
 
-    const p = runHandshake(ws, id, tofu);
+    const p = runHandshake(ws, id, tofuCheckAndPin);
     ws.inject(challengeJson("00".repeat(32)));
     await Promise.resolve();
     ws.inject(welcomeJson({ url: "wss://x", brokerPubkey: "DIFFERENT", protocol: 3 }));
@@ -110,10 +106,10 @@ describe("runHandshake", () => {
 
   it("rejects when broker protocol < 3", async () => {
     const ws = new MockSocket();
-    const id = await Identity.loadOrGenerate(new MemoryKv());
-    const tofu = new TofuStore(new MemoryKv());
+    const id = await Identity.generate();
+    const tofuCheckAndPin = (_: string): Promise<TofuResult> => Promise.resolve("new");
 
-    const p = runHandshake(ws, id, tofu);
+    const p = runHandshake(ws, id, tofuCheckAndPin);
     ws.inject(challengeJson("00".repeat(32)));
     await Promise.resolve();
     ws.inject(welcomeJson({ url: "wss://x", protocol: 2 }));
@@ -123,10 +119,10 @@ describe("runHandshake", () => {
 
   it("propagates error envelope as exception", async () => {
     const ws = new MockSocket();
-    const id = await Identity.loadOrGenerate(new MemoryKv());
-    const tofu = new TofuStore(new MemoryKv());
+    const id = await Identity.generate();
+    const tofuCheckAndPin = (_: string): Promise<TofuResult> => Promise.resolve("new");
 
-    const p = runHandshake(ws, id, tofu);
+    const p = runHandshake(ws, id, tofuCheckAndPin);
     ws.inject(challengeJson("00".repeat(32)));
     await Promise.resolve();
     ws.inject(errorJson("invalid signature"));

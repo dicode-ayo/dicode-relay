@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Identity } from "../../src/client/identity.js";
-import { MemoryKv } from "../../src/client/kv-adapter.js";
 import { buildAuthURL, decryptTokenEnvelope } from "../../src/client/auth.js";
 import { eciesEncrypt, buildSignedPayload, verifyECDSA } from "../../src/shared/crypto.js";
 import { loadBrokerSigningKey, buildDeliverySignaturePayload } from "../../src/shared/signing.js";
@@ -12,7 +11,7 @@ import type { OAuthTokenDeliveryPayload } from "../../src/shared/protocol.js";
 
 describe("buildAuthURL", () => {
   it("produces a URL whose signature verifies against the daemon pubkey", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const result = await buildAuthURL({
       provider: "github",
       scope: "repo",
@@ -37,7 +36,7 @@ describe("buildAuthURL", () => {
   });
 
   it("omits scope param when not supplied", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const result = await buildAuthURL({
       provider: "slack",
       identity: id,
@@ -51,7 +50,7 @@ describe("buildAuthURL", () => {
 
 describe("decryptTokenEnvelope", () => {
   it("verifies broker_sig and decrypts the plaintext token map", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const tmp = mkdtempSync(join(tmpdir(), "broker-key-"));
     const broker = loadBrokerSigningKey({}, tmp);
 
@@ -90,7 +89,7 @@ describe("decryptTokenEnvelope", () => {
   });
 
   it("rejects when broker_sig is missing", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const env: OAuthTokenDeliveryPayload = {
       type: "oauth_token_delivery",
       session_id: "x",
@@ -102,7 +101,7 @@ describe("decryptTokenEnvelope", () => {
   });
 
   it("rejects when broker_sig is invalid", async () => {
-    const id = await Identity.loadOrGenerate(new MemoryKv());
+    const id = await Identity.generate();
     const tmp = mkdtempSync(join(tmpdir(), "broker-key-"));
     const broker = loadBrokerSigningKey({}, tmp);
 

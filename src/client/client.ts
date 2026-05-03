@@ -2,8 +2,7 @@ import WebSocket from "ws";
 import { create, fromJson, toJson, type JsonValue } from "@bufbuild/protobuf";
 import { ClientMessageSchema, ServerMessageSchema } from "../relay/pb/relay_pb.js";
 import type { Identity } from "./identity.js";
-import type { TofuStore } from "./tofu.js";
-import { runHandshake, type SocketLike } from "./handshake.js";
+import { runHandshake, type SocketLike, type TofuResult } from "./handshake.js";
 import { dispatchRequest } from "./forwarder.js";
 import { newBackoff } from "./backoff.js";
 
@@ -29,7 +28,10 @@ export interface RelayClientOptions {
   serverURL: string;
   localPort: number;
   identity: Identity;
-  tofu: TofuStore;
+  /** Trust-on-first-use callback. Receives the broker's announced pubkey;
+   *  consumer compares against its persisted record, persists if "new",
+   *  returns "new" / "match" / "mismatch". RelayClient throws on "mismatch". */
+  tofuCheckAndPin: (brokerPubkeyB64: string) => Promise<TofuResult>;
   log: RelayClientLogger;
   /** Called whenever connection state changes. Use for status reporting. */
   onStatus?: (s: RelayStatus) => void;
@@ -127,7 +129,7 @@ export class RelayClient {
     });
 
     try {
-      const hr = await runHandshake(sock, this.opts.identity, this.opts.tofu);
+      const hr = await runHandshake(sock, this.opts.identity, this.opts.tofuCheckAndPin);
       // Detach the handshake message listener and collect any frames that
       // arrived in the microtask gap between the welcome frame and detach().
       // The broker may pipeline welcome + a request back-to-back; without
