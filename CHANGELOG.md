@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.3...v0.1.4) (2026-05-03)
+
+
+### Features
+
+* publish client subpath as dicode-relay/client ([#64](https://github.com/dicode-ayo/dicode-relay/issues/64)) ([46960be](https://github.com/dicode-ayo/dicode-relay/commit/46960beb9b1c2575bb35c09ccc953b32f9573863))
+
 ## [0.1.3](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.2...v0.1.3) (2026-04-24)
 
 
