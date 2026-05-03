@@ -274,6 +274,9 @@ const identity = stored
   ? await Identity.import(stored)
   : await (async () => {
       const id = await Identity.generate();
+      // StoredIdentity contains PRIVATE key material — treat it like a TLS
+      // private key. Use encrypted storage (e.g. dicode.kv with the daemon's
+      // secret-store backing).
       await myKv.set("identity", await id.export());
       return id;
     })();

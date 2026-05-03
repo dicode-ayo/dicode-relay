@@ -23,8 +23,14 @@ export class Identity {
     public readonly decryptPubkeyB64: string,
   ) {}
 
-  /** Generate a fresh split P-256 identity. The caller is responsible for
-   *  persisting the result of `export()` if they want a stable UUID across runs. */
+  /**
+   * Generate a fresh split P-256 identity. The caller is responsible for
+   * persisting the result of `export()` if they want a stable UUID across
+   * runs. UUID is derived as hex(sha256(uncompressed_sign_pubkey)) — 64
+   * lowercase hex chars — so a consumer can pre-compute the daemon UUID
+   * (and hook URL) before the first handshake, given the export's
+   * sign_priv_pkcs8_b64.
+   */
   static async generate(): Promise<Identity> {
     const sign = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
       "sign",

@@ -28,9 +28,17 @@ export interface RelayClientOptions {
   serverURL: string;
   localPort: number;
   identity: Identity;
-  /** Trust-on-first-use callback. Receives the broker's announced pubkey;
-   *  consumer compares against its persisted record, persists if "new",
-   *  returns "new" / "match" / "mismatch". RelayClient throws on "mismatch". */
+  /**
+   * Trust-on-first-use callback. Receives the broker's announced pubkey;
+   * the consumer compares against its persisted record and returns:
+   *   - "new"      — the consumer MUST persist the key before returning,
+   *                  otherwise TOFU is defeated (every connect would be
+   *                  treated as first-seen, accepting any key).
+   *   - "match"    — the announced key matches what the consumer pinned;
+   *                  the handshake continues normally.
+   *   - "mismatch" — the announced key differs from the pinned record;
+   *                  RelayClient rejects the handshake.
+   */
   tofuCheckAndPin: (brokerPubkeyB64: string) => Promise<TofuResult>;
   log: RelayClientLogger;
   /** Called whenever connection state changes. Use for status reporting. */

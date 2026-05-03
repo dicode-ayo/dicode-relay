@@ -91,6 +91,26 @@ describe("runHandshake", () => {
     expect(typeof sent.hello.sig).toBe("string");
   });
 
+  it("accepts on TOFU match (reconnect)", async () => {
+    const ws = new MockSocket();
+    const id = await Identity.generate();
+    const tofuCheckAndPin = (): Promise<TofuResult> => Promise.resolve("match");
+
+    const p = runHandshake(ws, id, tofuCheckAndPin);
+    ws.inject(challengeJson("00".repeat(32)));
+    await Promise.resolve();
+    ws.inject(
+      welcomeJson({
+        url: `wss://relay.example/u/${id.uuid}/hooks/`,
+        brokerPubkey: "BROKERPK",
+        protocol: 3,
+      }),
+    );
+
+    const result = await p;
+    expect(result.brokerPubkey).toBe("BROKERPK");
+  });
+
   it("rejects on TOFU mismatch", async () => {
     const ws = new MockSocket();
     const id = await Identity.generate();
