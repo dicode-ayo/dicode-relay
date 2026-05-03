@@ -2,7 +2,7 @@
  * Protocol type re-exports and conversion helpers.
  *
  * The canonical schema lives in `proto/relay.proto` and is regenerated into
- * `./pb/relay_pb.ts` by `buf generate`. This module keeps a small surface of
+ * `../relay/pb/relay_pb.ts` by `buf generate`. This module keeps a small surface of
  * re-exports and boundary conversions so callers (RelayServer consumers,
  * broker router) don't need to know about HeaderValues wrappers or the
  * oneof-envelope shape.
@@ -18,7 +18,7 @@ import type {
   ResponseSchema,
   ServerMessageSchema,
   WelcomeSchema,
-} from "./pb/relay_pb.js";
+} from "../relay/pb/relay_pb.js";
 import type { MessageShape } from "@bufbuild/protobuf";
 
 export type ClientMessage = MessageShape<typeof ClientMessageSchema>;

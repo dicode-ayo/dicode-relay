@@ -10,7 +10,7 @@ import {
   loadBrokerSigningKey,
   buildDeliverySignaturePayload,
   verifyDeliverySignature,
-} from "../../src/broker/signing.js";
+} from "../../src/shared/signing.js";
 
 const tmpKeyPath = join(process.cwd(), "test-broker-signing-key.pem");
 

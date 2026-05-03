@@ -258,6 +258,57 @@ server {
 
 ---
 
+## Client library
+
+This package also publishes a TypeScript/Web-Crypto client library at
+`dicode-relay/client`, used by dicode-core's built-in tasks to maintain
+the WSS tunnel and run OAuth flows. The library is pure protocol + crypto —
+consumers own all persistence. Example:
+
+```ts
+import { RelayClient, Identity, type StoredIdentity } from "dicode-relay/client";
+
+// Consumer owns persistence — example using a hypothetical KV.
+const stored = await myKv.get<StoredIdentity>("identity");
+const identity = stored
+  ? await Identity.import(stored)
+  : await (async () => {
+      const id = await Identity.generate();
+      // StoredIdentity contains PRIVATE key material — treat it like a TLS
+      // private key. Use encrypted storage (e.g. dicode.kv with the daemon's
+      // secret-store backing).
+      await myKv.set("identity", await id.export());
+      return id;
+    })();
+
+const tofuCheckAndPin = async (brokerPubkeyB64: string) => {
+  const pinned = await myKv.get<string>("broker_pubkey");
+  if (pinned === null) {
+    await myKv.set("broker_pubkey", brokerPubkeyB64);
+    return "new" as const;
+  }
+  return pinned === brokerPubkeyB64 ? "match" as const : "mismatch" as const;
+};
+
+const client = new RelayClient({
+  serverURL: "wss://relay.example/",
+  localPort: 8080,
+  identity,
+  tofuCheckAndPin,
+  log: console,
+  onStatus: (s) => console.log("status:", s),
+});
+
+await client.run();
+```
+
+The client targets Node.js 22+ and Deno (both expose `node:crypto`). It is not
+browser-compatible — `node:crypto` primitives are used for HKDF, AES-GCM decrypt,
+and broker signature verification. In dicode tasks, use `dicode.kv` from the
+SDK to persist the `StoredIdentity` blob and the pinned broker pubkey.
+
+---
+
 ## Contributing
 
 ```sh

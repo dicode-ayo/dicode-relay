@@ -32,7 +32,7 @@ import {
   type Response as ResponseMessage,
   type ServerMessage,
 } from "./pb/relay_pb.js";
-import type { ForwardResponse } from "./protocol.js";
+import type { ForwardResponse } from "../shared/protocol.js";
 
 // ---------------------------------------------------------------------------
 // Error types

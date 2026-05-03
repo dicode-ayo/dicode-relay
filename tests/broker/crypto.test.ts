@@ -9,7 +9,7 @@ import {
   eciesDecrypt,
   eciesEncrypt,
   verifyECDSA,
-} from "../../src/broker/crypto.js";
+} from "../../src/shared/crypto.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

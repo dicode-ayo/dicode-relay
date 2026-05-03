@@ -13,11 +13,11 @@
 import { Router, type Request, type Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import type { RelayServer } from "../relay/server.js";
-import { buildSignedPayload, eciesEncrypt, verifyECDSA } from "./crypto.js";
+import { buildSignedPayload, eciesEncrypt, verifyECDSA } from "../shared/crypto.js";
 import type { ProviderConfig } from "./providers.js";
 import type { SessionStore } from "./sessions.js";
-import type { OAuthTokenDeliveryPayload } from "../relay/protocol.js";
-import { buildDeliverySignaturePayload, type BrokerSigningKey } from "./signing.js";
+import type { OAuthTokenDeliveryPayload } from "../shared/protocol.js";
+import { buildDeliverySignaturePayload, type BrokerSigningKey } from "../shared/signing.js";
 
 /**
  * Fields that may be forwarded from an OAuth callback into the encrypted

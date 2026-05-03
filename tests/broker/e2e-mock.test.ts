@@ -17,9 +17,9 @@ import {
   MOCK_PROVIDER_KEY,
 } from "../../src/broker/e2e-mock.js";
 import { SessionStore } from "../../src/broker/sessions.js";
-import { verifyDeliverySignature } from "../../src/broker/signing.js";
-import type { BrokerSigningKey } from "../../src/broker/signing.js";
-import { loadBrokerSigningKey } from "../../src/broker/signing.js";
+import { verifyDeliverySignature } from "../../src/shared/signing.js";
+import type { BrokerSigningKey } from "../../src/shared/signing.js";
+import { loadBrokerSigningKey } from "../../src/shared/signing.js";
 import { RelayServer } from "../../src/relay/server.js";
 import { testRelayOpts, testSessionTtlMs } from "../helpers.js";
 

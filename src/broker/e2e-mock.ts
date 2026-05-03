@@ -25,11 +25,11 @@
 
 import type { Request, Response, Router } from "express";
 import { Router as makeRouter, json } from "express";
-import { eciesEncrypt } from "./crypto.js";
-import type { OAuthTokenDeliveryPayload } from "../relay/protocol.js";
+import { eciesEncrypt } from "../shared/crypto.js";
+import type { OAuthTokenDeliveryPayload } from "../shared/protocol.js";
 import type { RelayServer } from "../relay/server.js";
 import type { SessionStore } from "./sessions.js";
-import { buildDeliverySignaturePayload, type BrokerSigningKey } from "./signing.js";
+import { buildDeliverySignaturePayload, type BrokerSigningKey } from "../shared/signing.js";
 
 /** Provider key used throughout the mock flow. */
 export const MOCK_PROVIDER_KEY = "mock";

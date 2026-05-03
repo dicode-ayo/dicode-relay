@@ -23,7 +23,7 @@ import { buildBrokerRouter } from "./broker/router.js";
 import { MOCK_PROVIDER_KEY, buildE2EMockRouter, isE2EMockEnabled } from "./broker/e2e-mock.js";
 import { buildProviderMap, type ProviderConfig } from "./broker/providers.js";
 import { SessionStore } from "./broker/sessions.js";
-import { loadBrokerSigningKey } from "./broker/signing.js";
+import { loadBrokerSigningKey } from "./shared/signing.js";
 import { MetricsCollector } from "./status/metrics.js";
 import { statusAuth } from "./status/auth.js";
 import { renderStatusPage, buildStatusJson } from "./status/page.js";
