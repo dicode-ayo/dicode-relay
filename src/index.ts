@@ -218,6 +218,10 @@ app.get("/providers", (_req, res) => {
       pkce: cfg.pkce,
       scopes: cfg.scopes,
       secret_required: cfg.clientSecret !== undefined,
+      // buildProviderMap already skips providers with empty clientId, so every
+      // entry in realProviders has a non-empty clientId → always true here.
+      // The field exists for API forward-compatibility with a future
+      // "show unconfigured providers" mode.
       configured: cfg.clientId !== "",
     }),
   );
