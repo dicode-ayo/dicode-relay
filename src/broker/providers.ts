@@ -7,6 +7,21 @@
 
 import type { RelayConfig } from "../config.js";
 
+/** Public metadata about a configured OAuth provider — no secret values exposed. */
+export interface PublicProviderInfo {
+  /** Provider key (matches Grant's provider key, e.g. "github", "slack") */
+  key: string;
+  /** Whether PKCE is used */
+  pkce: boolean;
+  /** Default scopes the broker uses if the auth-start task doesn't override */
+  scopes: string[];
+  /** Whether this provider requires a client_secret (true = secret_required) */
+  secret_required: boolean;
+  /** Whether the broker has client_id configured. False means the provider
+   *  is in the YAML but lacks credentials → not enabled in this deployment. */
+  configured: boolean;
+}
+
 /** Runtime provider config with resolved (non-env-ref) values. */
 export interface ProviderConfig {
   /** Grant's provider key — same as the YAML key (e.g. "github", "slack") */

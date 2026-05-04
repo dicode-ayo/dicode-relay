@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `GET /providers` endpoint — returns the list of configured OAuth providers
+  (key, scopes, PKCE flag, secret-required flag, configured flag). No secret
+  material exposed. Consumed by dicode-core's `auth-providers` task.
+
 ## [0.1.4](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.3...v0.1.4) (2026-05-03)
 
 
