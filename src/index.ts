@@ -21,7 +21,11 @@ import { RelayServer } from "./relay/server.js";
 import { buildGrantMiddleware } from "./broker/grant.js";
 import { buildBrokerRouter } from "./broker/router.js";
 import { MOCK_PROVIDER_KEY, buildE2EMockRouter, isE2EMockEnabled } from "./broker/e2e-mock.js";
-import { buildProviderMap, type ProviderConfig } from "./broker/providers.js";
+import {
+  buildProviderMap,
+  type ProviderConfig,
+  type PublicProviderInfo,
+} from "./broker/providers.js";
 import { SessionStore } from "./broker/sessions.js";
 import { loadBrokerSigningKey } from "./shared/signing.js";
 import { MetricsCollector } from "./status/metrics.js";
@@ -204,6 +208,24 @@ app.get("/api/status", statusAuth(statusPassword), (_req, res) => {
 // Health check
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+// Public provider metadata — no secret values exposed.
+app.get("/providers", (_req, res) => {
+  const list = Array.from(realProviders.entries()).map(
+    ([key, cfg]): PublicProviderInfo => ({
+      key,
+      pkce: cfg.pkce,
+      scopes: cfg.scopes,
+      secret_required: cfg.clientSecret !== undefined,
+      // buildProviderMap already skips providers with empty clientId, so every
+      // entry in realProviders has a non-empty clientId → always true here.
+      // The field exists for API forward-compatibility with a future
+      // "show unconfigured providers" mode.
+      configured: cfg.clientId !== "",
+    }),
+  );
+  res.json(list);
 });
 
 // Start listening
