@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.4...v0.1.5) (2026-05-04)
+
+
+### Features
+
+* GET /providers endpoint ([#66](https://github.com/dicode-ayo/dicode-relay/issues/66)) ([9421616](https://github.com/dicode-ayo/dicode-relay/commit/9421616f6692afca868a5d2962ea56381d223bb9))
+
 ## [Unreleased]
 
 ### Added
