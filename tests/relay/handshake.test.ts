@@ -355,17 +355,26 @@ describe("NonceStore", () => {
     }
   });
 
-  it("size is bounded by the LRU ceiling under flood", () => {
-    // Sanity check: feeding far more unique nonces than the configured
-    // ceiling (100k in production) keeps `size` at the ceiling rather
-    // than growing unbounded. Uses 256 unique nonces to stay fast; the
-    // invariant is `size <= max`, which lru-cache enforces regardless of
-    // the specific ceiling value.
-    const store = new NonceStore(testNonceTtlMs);
-    for (let i = 0; i < 256; i++) {
-      store.check(randomBytes(32).toString("hex"));
+  // Pins the memory ceiling promised by NonceStore's docstring. Without this
+  // a future bump of the underlying LRUCache config that drops `max` would
+  // silently regress the unbounded-memory protection that was the whole
+  // point of switching from Map+setTimeout.
+  it("size never exceeds the configured max — LRU evicts oldest", () => {
+    // Long TTL so eviction is purely LRU, not TTL — we're testing the
+    // ceiling behavior in isolation.
+    const store = new NonceStore(60 * 60 * 1000);
+    const N = 100_010; // 10 over the documented 100k ceiling
+    const firstNonce = "00".repeat(32);
+    expect(store.check(firstNonce)).toBe(false);
+    for (let i = 1; i < N; i++) {
+      // Synthetic but unique 64-hex nonces; we only need `i` to be unique.
+      const n = i.toString(16).padStart(64, "0");
+      store.check(n);
     }
     expect(store.size).toBeLessThanOrEqual(100_000);
-    expect(store.size).toBe(256);
+    // The very first nonce must have been LRU-evicted; check() returning
+    // false again proves it is no longer tracked. (Side-effect: this
+    // re-inserts it, but the assertion has already happened.)
+    expect(store.check(firstNonce)).toBe(false);
   });
 });
