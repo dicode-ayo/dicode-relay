@@ -85,22 +85,23 @@ broker:
     expect(stderr).toContain("config check failed");
   }, 30_000);
 
-  it("exits non-zero for an unreadable signing key path", async () => {
-    // Path under `dir` that doesn't exist — fails with ENOENT identically
-    // on Linux and macOS (the previous /proc/1/... approach worked on
-    // Linux runners but produced a confusing error on macOS dev machines
-    // that don't have /proc).
-    const unreadable = join(dir, "nonexistent-dir", "broker-signing.key");
+  it("exits non-zero when signing_key_file points at a missing file", async () => {
+    // Operator-trusted YAML path: `--check` must surface a clear error so
+    // typo'd `signing_key_file` paths are caught at config-validation time
+    // rather than silently auto-generating at the wrong location (which
+    // would rotate the broker pubkey and break TOFU-pinned daemons —
+    // see issue #54 for the broader hardening plan).
+    const target = join(dir, "nonexistent-dir", "broker-signing.key");
     writeFileSync(
       configPath,
       `
 broker:
-  signing_key_file: ${unreadable}
+  signing_key_file: ${target}
 `,
     );
 
     const { code, stderr } = await runCli(["--check", "--config", configPath]);
     expect(code).not.toBe(0);
-    expect(stderr).toContain("config check failed");
+    expect(stderr).toMatch(/broker\.signing_key_file points to a missing file/);
   }, 30_000);
 });

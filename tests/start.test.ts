@@ -240,17 +240,18 @@ broker:
     await handle.close();
   });
 
-  it("rejects when signing_key_file points at an unreadable path", async () => {
-    // Use a path under `ctx.dir` that doesn't exist — fails with ENOENT
-    // identically on Linux and macOS (the previous /proc/1/... approach
-    // worked on Linux runners but produced a confusing error on macOS
-    // developer machines that don't have /proc).
-    const unreadable = join(ctx.dir, "nonexistent-dir", "broker-signing.key");
+  it("rejects a signing_key_file pointing at a missing file (configured-path branch never auto-generates)", async () => {
+    // Operator-trusted YAML path: a typo'd `signing_key_file` must surface a
+    // clear error rather than silently auto-generating at the wrong path
+    // (which would rotate the broker pubkey and break TOFU-pinned daemons).
+    // dryRun still exercises the same loader, so the error fires there too.
+    // Issue #54 tracks broader hardening of auto-gen surface area.
+    const target = join(ctx.dir, "nonexistent-dir", "broker-signing.key");
     writeYaml(
       ctx,
       `
 broker:
-  signing_key_file: ${unreadable}
+  signing_key_file: ${target}
 `,
     );
 
@@ -260,7 +261,10 @@ broker:
         env: { ...process.env },
         dryRun: true,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/broker\.signing_key_file points to a missing file/);
+
+    // Importantly: no file or parent dir was materialised as a side effect.
+    expect(existsSync(target)).toBe(false);
   });
 });
 
