@@ -13,8 +13,14 @@ server:
     cert_file: ""          # e.g. ${TLS_CERT_FILE}
     key_file: ""           # e.g. ${TLS_KEY_FILE}
 
-status:
-  password: ${STATUS_PASSWORD}
+# status:
+#   # Uncomment and set STATUS_PASSWORD in the environment to enable the
+#   # password-protected /status dashboard (basic auth, password-only — the
+#   # username is ignored). Leaving the entire section commented out, or
+#   # omitting `password`, makes /status and /api/status return 404
+#   # ("status page not configured"). An empty value is rejected at load
+#   # time so a typo'd STATUS_PASSWORD never silently exposes the dashboard.
+#   password: ${STATUS_PASSWORD}
 
 relay:
   timestamp_tolerance_s: 30

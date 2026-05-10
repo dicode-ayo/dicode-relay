@@ -5,6 +5,7 @@
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ZodError } from "zod";
 import { loadConfig, defaultConfig } from "../src/config.js";
 import { buildProviderMap } from "../src/broker/providers.js";
 
@@ -103,6 +104,152 @@ broker:
     expect(() => loadConfig({ RELAY_CONFIG: "/nonexistent/relay.yaml" })).toThrow(
       "Config file not found",
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Security-critical fields reject empty values at load time
+  // ---------------------------------------------------------------------------
+  //
+  // resolveEnvVars collapses unresolved `${VAR}` placeholders to "" and warns.
+  // For provider client_id / client_secret that's by design (silently disables
+  // the provider). For status.password and server.base_url it's a silent
+  // misconfiguration that breaks security (public dashboard) or functionality
+  // (broken OAuth callbacks). Zod's .min(1) rejects at parse time with a
+  // clear message naming the field — fail closed before HTTP routes mount.
+
+  it("rejects unresolved ${STATUS_PASSWORD} with a clear ZodError", () => {
+    writeFileSync(
+      tmpPath,
+      `
+status:
+  password: \${STATUS_PASSWORD}
+`,
+    );
+
+    let caught: unknown;
+    try {
+      loadConfig({ RELAY_CONFIG: tmpPath });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ZodError);
+    const msg = (caught as ZodError).issues.map((i) => i.message).join("\n");
+    expect(msg).toContain("status.password must be non-empty");
+    expect(msg).toMatch(/STATUS_PASSWORD/);
+    // Path on the issue must name the offending field
+    const paths = (caught as ZodError).issues.map((i) => i.path.join("."));
+    expect(paths).toContain("status.password");
+  });
+
+  it("rejects literal empty status.password in YAML", () => {
+    writeFileSync(tmpPath, 'status:\n  password: ""\n');
+    expect(() => loadConfig({ RELAY_CONFIG: tmpPath })).toThrow(ZodError);
+  });
+
+  it("accepts an omitted status section (dashboard disabled, /status returns 404)", () => {
+    writeFileSync(tmpPath, "server:\n  port: 5555\n");
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.status.password).toBeUndefined();
+  });
+
+  it("accepts a YAML `password:` (null) and treats it as absent", () => {
+    // js-yaml parses `password:` with no value as `null`. .optional() would
+    // reject this with a generic Zod error; .nullish().transform() maps null
+    // back to undefined so it falls through to the documented "omit to
+    // disable" default (statusAuth(undefined) → 404).
+    writeFileSync(tmpPath, "status:\n  password:\n");
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.status.password).toBeUndefined();
+  });
+
+  it("accepts an explicit `password: null` and treats it as absent", () => {
+    writeFileSync(tmpPath, "status:\n  password: null\n");
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.status.password).toBeUndefined();
+  });
+
+  it("accepts a YAML `password: ~` (null) and treats it as absent", () => {
+    writeFileSync(tmpPath, "status:\n  password: ~\n");
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.status.password).toBeUndefined();
+  });
+
+  it('rejects `password: "${STATUS_PASSWORD}"` when STATUS_PASSWORD is unset (resolves to "")', () => {
+    // Same as the ${STATUS_PASSWORD} reproducer above, but with the value
+    // explicitly quoted in YAML — the env interpolation still collapses to
+    // "" and Zod's .min(1) check fires with the curated message.
+    writeFileSync(tmpPath, 'status:\n  password: "${STATUS_PASSWORD}"\n');
+    let caught: unknown;
+    try {
+      loadConfig({ RELAY_CONFIG: tmpPath });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ZodError);
+    const msg = (caught as ZodError).issues.map((i) => i.message).join("\n");
+    expect(msg).toContain("status.password must be non-empty");
+  });
+
+  it("rejects unresolved ${BASE_URL} with a clear ZodError", () => {
+    writeFileSync(
+      tmpPath,
+      `
+server:
+  port: 5553
+  base_url: \${BASE_URL}
+`,
+    );
+
+    let caught: unknown;
+    try {
+      loadConfig({ RELAY_CONFIG: tmpPath });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ZodError);
+    const msg = (caught as ZodError).issues.map((i) => i.message).join("\n");
+    expect(msg).toContain("server.base_url must be non-empty");
+    expect(msg).toMatch(/BASE_URL/);
+    const paths = (caught as ZodError).issues.map((i) => i.path.join("."));
+    expect(paths).toContain("server.base_url");
+  });
+
+  it("rejects literal empty server.base_url in YAML", () => {
+    writeFileSync(tmpPath, 'server:\n  port: 5553\n  base_url: ""\n');
+    expect(() => loadConfig({ RELAY_CONFIG: tmpPath })).toThrow(ZodError);
+  });
+
+  it("accepts an omitted base_url and falls back to http://localhost:<port>", () => {
+    writeFileSync(tmpPath, "server:\n  port: 6666\n");
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.server.base_url).toBe("http://localhost:6666");
+  });
+
+  it("accepts a YAML `base_url:` (null) and falls back to localhost", () => {
+    // js-yaml parses `base_url:` with no value as `null`. .nullish() maps it
+    // to undefined so the outer transform's localhost fallback fires.
+    writeFileSync(tmpPath, "server:\n  port: 7777\n  base_url:\n");
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.server.base_url).toBe("http://localhost:7777");
+  });
+
+  it("accepts an explicit `base_url: null` and falls back to localhost", () => {
+    writeFileSync(tmpPath, "server:\n  port: 8888\n  base_url: null\n");
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.server.base_url).toBe("http://localhost:8888");
+  });
+
+  it('rejects `base_url: "${BASE_URL}"` when BASE_URL is unset (resolves to "")', () => {
+    writeFileSync(tmpPath, 'server:\n  port: 5553\n  base_url: "${BASE_URL}"\n');
+    let caught: unknown;
+    try {
+      loadConfig({ RELAY_CONFIG: tmpPath });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ZodError);
+    const msg = (caught as ZodError).issues.map((i) => i.message).join("\n");
+    expect(msg).toContain("server.base_url must be non-empty");
   });
 });
 
