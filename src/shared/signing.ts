@@ -40,14 +40,23 @@ export interface BrokerSigningKey {
 /**
  * Load or generate the broker's signing key.
  *
- * @param env             process.env (or test override)
- * @param cwd             working directory for auto-generated key fallback
- * @param signingKeyFile  `broker.signing_key_file` from relay.yaml (or "" if unset)
+ * @param env                process.env (or test override)
+ * @param cwd                working directory for auto-generated key fallback
+ * @param signingKeyFile     `broker.signing_key_file` from relay.yaml (or "" if unset)
+ * @param allowAutoGenerate  when no env/file source is present, controls the
+ *                           fallback: `true` (default — legacy CLI behavior)
+ *                           persists a freshly generated key to
+ *                           `<cwd>/broker-signing-key.pem`; `false` returns an
+ *                           in-memory ephemeral key without touching disk.
+ *                           `startServer({ dryRun: true })` passes `false` so
+ *                           config-validation runs never write secret material
+ *                           into the caller's cwd.
  */
 export function loadBrokerSigningKey(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
   signingKeyFile = "",
+  allowAutoGenerate = true,
 ): BrokerSigningKey {
   let pem: string;
 
@@ -61,6 +70,16 @@ export function loadBrokerSigningKey(
     const autoPath = join(cwd, AUTO_KEY_FILENAME);
     if (existsSync(autoPath)) {
       pem = readFileSync(autoPath, "utf8");
+    } else if (!allowAutoGenerate) {
+      // dryRun / library-validation path: derive an ephemeral key in-memory
+      // so the broker router can still wire up, but never persist it. The
+      // returned key is thrown away when the StartHandle is closed.
+      const pair = generateKeyPairSync("ec", {
+        namedCurve: "prime256v1",
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+      pem = pair.privateKey;
     } else {
       const pair = generateKeyPairSync("ec", {
         namedCurve: "prime256v1",

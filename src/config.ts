@@ -100,7 +100,7 @@ const BrokerSchema = z.object({
   providers: z.record(z.string(), ProviderSchema).default(() => ({})),
 });
 
-const ConfigSchema = z.object({
+export const ConfigSchema = z.object({
   server: ServerSchema.default(() => ServerSchema.parse({})),
   status: StatusSchema.default(() => StatusSchema.parse({})),
   relay: RelaySchema.default(() => RelaySchema.parse({})),

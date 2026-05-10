@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import express from "express";
-import { loadConfig, type RelayConfig } from "./config.js";
+import { ConfigSchema, loadConfig, type RelayConfig } from "./config.js";
 import { RelayServer } from "./relay/server.js";
 import { buildGrantMiddleware } from "./broker/grant.js";
 import { buildBrokerRouter } from "./broker/router.js";
@@ -69,7 +69,15 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   }
 
   const env = opts.env ?? process.env;
-  const config = opts.config ?? loadConfig(env, opts.configPath);
+  // Re-validate caller-supplied configs through Zod. The TS `RelayConfig` type
+  // gives compile-time safety only; JS/Deno callers (where TS types are erased
+  // at the npm package boundary) can pass anything that *looks* like the shape.
+  // Routing untrusted input through `ConfigSchema.parse` makes this a defensive
+  // library entry point — costs one cheap parse on startup; catches numeric
+  // ports passed as strings, missing nested keys, etc. before they reach
+  // `readFileSync` / `loadBrokerSigningKey`.
+  const config =
+    opts.config !== undefined ? ConfigSchema.parse(opts.config) : loadConfig(env, opts.configPath);
   const { server: serverCfg, relay: relayCfg, broker: brokerCfg, status: statusCfg } = config;
 
   // -------------------------------------------------------------------------
@@ -95,7 +103,20 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   // Broker signing key
   // -------------------------------------------------------------------------
 
-  const brokerKey = loadBrokerSigningKey(env, process.cwd(), brokerCfg.signing_key_file);
+  // Under dryRun, refuse to materialise a fresh signing key to disk. The
+  // intent of dryRun is "validate, don't commit to anything" — every external
+  // supervisor (and every test run) that calls `startServer({ dryRun: true })`
+  // would otherwise silently write `broker-signing-key.pem` into the
+  // supervisor's cwd, widening the open issue around unconfigured signing
+  // keys. When no env override or file is configured under dryRun, we derive
+  // an ephemeral in-memory key purely so the broker router can still wire up.
+  const allowAutoGenerate = opts.dryRun !== true;
+  const brokerKey = loadBrokerSigningKey(
+    env,
+    process.cwd(),
+    brokerCfg.signing_key_file,
+    allowAutoGenerate,
+  );
 
   // -------------------------------------------------------------------------
   // Relay server
@@ -137,7 +158,7 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   // Grant must NOT receive the mock entry — /connect/mock is handled by the
   // e2e-mock router, and Grant would otherwise try to dispatch it upstream.
   const brokerProviders = new Map<string, ProviderConfig>(realProviders);
-  if (isE2EMockEnabled()) {
+  if (isE2EMockEnabled(env)) {
     brokerProviders.set(MOCK_PROVIDER_KEY, {
       grantKey: MOCK_PROVIDER_KEY,
       // Obviously-fake placeholder — never reaches Grant (see buildGrantMiddleware

@@ -86,11 +86,16 @@ broker:
   }, 30_000);
 
   it("exits non-zero for an unreadable signing key path", async () => {
+    // Path under `dir` that doesn't exist — fails with ENOENT identically
+    // on Linux and macOS (the previous /proc/1/... approach worked on
+    // Linux runners but produced a confusing error on macOS dev machines
+    // that don't have /proc).
+    const unreadable = join(dir, "nonexistent-dir", "broker-signing.key");
     writeFileSync(
       configPath,
       `
 broker:
-  signing_key_file: /proc/1/cant-write-here/broker-signing.key
+  signing_key_file: ${unreadable}
 `,
     );
 

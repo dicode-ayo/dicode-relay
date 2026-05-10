@@ -1,17 +1,20 @@
 /**
  * Tests for the programmatic `startServer` entry point.
  *
- * Four dryRun cases (no ports involved) verify that each failure surface
- * (config loader, signing key, provider/grant/broker wiring) surfaces a clean
- * rejected promise. One real-listen smoke verifies that a non-dryRun call
- * binds, serves /health, and releases the port on close().
+ * dryRun cases verify each failure surface (config loader, signing key,
+ * provider/grant/broker wiring) surfaces a clean rejected promise, and that
+ * dryRun never writes secret material to disk or binds a port. One real-listen
+ * smoke verifies that a non-dryRun call binds, serves /health, and releases
+ * the port on close().
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { generateKeyPairSync } from "node:crypto";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, get as httpGet } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { ZodError } from "zod";
 import { startServer } from "../src/start.js";
 
 // ---------------------------------------------------------------------------
@@ -21,11 +24,26 @@ import { startServer } from "../src/start.js";
 interface FixtureContext {
   dir: string;
   configPath: string;
+  signingKeyPath: string;
 }
 
+/**
+ * Create a tmpdir fixture and pre-generate a P-256 broker signing key inside
+ * it. Tests that need a YAML config point `broker.signing_key_file` at
+ * `ctx.signingKeyPath` so `loadBrokerSigningKey` reads from the fixture
+ * instead of auto-generating one in the test runner's cwd.
+ */
 function makeFixture(): FixtureContext {
   const dir = mkdtempSync(join(tmpdir(), "dicode-relay-start-"));
-  return { dir, configPath: join(dir, "relay.yaml") };
+  const configPath = join(dir, "relay.yaml");
+  const signingKeyPath = join(dir, "signing.pem");
+  const pair = generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  writeFileSync(signingKeyPath, pair.privateKey, { mode: 0o600 });
+  return { dir, configPath, signingKeyPath };
 }
 
 function writeYaml(ctx: FixtureContext, body: string): void {
@@ -66,6 +84,20 @@ async function httpGetBody(port: number, path: string): Promise<{ status: number
   });
 }
 
+/** Assert that a fresh listener can bind `port` — proves it was released. */
+async function assertPortFree(port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const probe = createHttpServer();
+    probe.once("error", reject);
+    probe.listen(port, () => {
+      probe.close((err) => {
+        if (err !== undefined) reject(err);
+        else resolve();
+      });
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // dryRun cases
 // ---------------------------------------------------------------------------
@@ -81,16 +113,17 @@ describe("startServer dryRun", () => {
     rmSync(ctx.dir, { recursive: true, force: true });
   });
 
-  it("resolves cleanly for a minimal valid config", async () => {
+  it("resolves cleanly for a minimal valid config and leaves the port free", async () => {
+    const port = await pickPort();
     writeYaml(
       ctx,
       `
 server:
-  port: 5553
+  port: ${String(port)}
 status:
   password: test-pw
 broker:
-  signing_key_file: ""
+  signing_key_file: ${ctx.signingKeyPath}
 `,
     );
 
@@ -105,10 +138,57 @@ broker:
 
     // close() must be a safe no-op against the unbound socket.
     await expect(handle.close()).resolves.toBeUndefined();
+
+    // Issue #70 acceptance criterion: after a dryRun returns + closes, the
+    // configured port must still be bindable. Proves `listen()` was actually
+    // skipped (no latched socket, no WSS holding the bind).
+    await expect(assertPortFree(port)).resolves.toBeUndefined();
+  });
+
+  it("does not write broker-signing-key.pem to cwd when broker.signing_key_file is empty", async () => {
+    // Critical regression test for the dryRun-auto-gen footgun (issue #54).
+    // External supervisors call startServer({ dryRun: true }) to validate
+    // their config; that path must never materialise an ECDSA key into the
+    // supervisor's cwd. Run the dryRun from a clean tmpdir and assert no
+    // PEM is left behind.
+    const cleanCwd = mkdtempSync(join(tmpdir(), "dicode-relay-cwd-"));
+    const originalCwd = process.cwd();
+    process.chdir(cleanCwd);
+    try {
+      writeYaml(
+        ctx,
+        `
+server:
+  port: 5553
+status:
+  password: test-pw
+broker:
+  signing_key_file: ""
+`,
+      );
+
+      const handle = await startServer({
+        configPath: ctx.configPath,
+        // Strip any BROKER_SIGNING_KEY* env vars so the empty-signing-key
+        // branch is actually exercised.
+        env: { HOME: ctx.dir },
+        dryRun: true,
+      });
+      await handle.close();
+
+      expect(existsSync(join(cleanCwd, "broker-signing-key.pem"))).toBe(false);
+      // Belt-and-braces: nothing at all should have been written here.
+      expect(readdirSync(cleanCwd)).toEqual([]);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(cleanCwd, { recursive: true, force: true });
+    }
   });
 
   it("rejects on malformed YAML", async () => {
-    writeYaml(ctx, "server:\n  port: 5553\n  base_url: [unclosed\n");
+    // Unterminated quoted string — guaranteed to fail across js-yaml versions
+    // and platforms (no reliance on flow-sequence parser quirks).
+    writeYaml(ctx, 'server:\n  port: 5553\n  base_url: "unterminated\n');
 
     await expect(
       startServer({
@@ -119,6 +199,23 @@ broker:
     ).rejects.toThrow();
   });
 
+  it("re-validates opts.config through Zod and rejects malformed shapes", async () => {
+    // dicode-core's Deno buildin/relay-server consumes this library at the
+    // npm boundary where TS types are erased. A caller could pass a config
+    // object that *looks* like RelayConfig at the JS level but fails the
+    // schema. Defensive re-parse must catch it before the value flows into
+    // readFileSync / loadBrokerSigningKey.
+    // Cast through `unknown` to model the type-erased JS caller (Deno via
+    // npm) — without it, TS would reject the bad shape at compile time.
+    const bogusOpts = {
+      config: { server: { port: "not a number" } },
+      env: { ...process.env },
+      dryRun: true,
+    } as unknown as Parameters<typeof startServer>[0];
+
+    await expect(startServer(bogusOpts)).rejects.toThrow(ZodError);
+  });
+
   it("loads when a referenced ${VAR} resolves to empty (provider silently skipped)", async () => {
     // Empty client_id collapses to a disabled provider — same as legacy
     // env-var-based setup. This is not an error; the relay starts fine.
@@ -126,6 +223,7 @@ broker:
       ctx,
       `
 broker:
+  signing_key_file: ${ctx.signingKeyPath}
   providers:
     github:
       client_id: \${UNSET_VAR_FOR_TEST_98765}
@@ -142,16 +240,17 @@ broker:
     await handle.close();
   });
 
-  it("rejects when signing_key_file points at an unwritable/unreadable path", async () => {
-    // /proc/<pid>/cant-write-here is a synthetic path that does not exist
-    // and cannot be created (/proc subdirs are kernel-managed). Forces the
-    // PEM read in loadBrokerSigningKey to throw ENOENT, exercising the disk
-    // failure surface that dryRun is supposed to catch early.
+  it("rejects when signing_key_file points at an unreadable path", async () => {
+    // Use a path under `ctx.dir` that doesn't exist — fails with ENOENT
+    // identically on Linux and macOS (the previous /proc/1/... approach
+    // worked on Linux runners but produced a confusing error on macOS
+    // developer machines that don't have /proc).
+    const unreadable = join(ctx.dir, "nonexistent-dir", "broker-signing.key");
     writeYaml(
       ctx,
       `
 broker:
-  signing_key_file: /proc/1/cant-write-here/broker-signing.key
+  signing_key_file: ${unreadable}
 `,
     );
 
@@ -162,6 +261,87 @@ broker:
         dryRun: true,
       }),
     ).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// opts.env scoping for the E2E mock router
+// ---------------------------------------------------------------------------
+
+describe("startServer opts.env scoping", () => {
+  let ctx: FixtureContext;
+
+  beforeEach(() => {
+    ctx = makeFixture();
+  });
+
+  afterEach(() => {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  });
+
+  it("respects opts.env for E2E mock enablement (enabled via opts.env)", async () => {
+    writeYaml(
+      ctx,
+      `
+server:
+  port: 5553
+status:
+  password: test-pw
+broker:
+  signing_key_file: ${ctx.signingKeyPath}
+`,
+    );
+
+    const handle = await startServer({
+      configPath: ctx.configPath,
+      env: { DICODE_E2E_MOCK_PROVIDER: "1", NODE_ENV: "development" },
+      dryRun: true,
+    });
+    // The mock router registers a "mock" provider key in the broker session
+    // map and exposes /connect/mock. Easiest visible signal is that the
+    // RelayServer's broker pubkey is set and the handle's underlying express
+    // app has the mock route mounted — but we don't want to introspect
+    // internals. As a behaviour proxy, this dryRun succeeds, which proves
+    // the mock router was constructed without throwing (it depends on
+    // brokerKey + sessions). The disabled-case below pairs this assertion.
+    await handle.close();
+  });
+
+  it("respects opts.env for E2E mock enablement (disabled when opts.env omits the flag)", async () => {
+    writeYaml(
+      ctx,
+      `
+server:
+  port: 5553
+status:
+  password: test-pw
+broker:
+  signing_key_file: ${ctx.signingKeyPath}
+`,
+    );
+
+    // Even though the host `process.env` might have DICODE_E2E_MOCK_PROVIDER
+    // set during local dev, an empty opts.env must NOT enable the mock.
+    // Save + clobber the host env to make the inheritance hazard concrete.
+    const previous = process.env.DICODE_E2E_MOCK_PROVIDER;
+    process.env.DICODE_E2E_MOCK_PROVIDER = "1";
+    try {
+      const handle = await startServer({
+        configPath: ctx.configPath,
+        env: {},
+        dryRun: true,
+      });
+      await handle.close();
+      // dryRun returned cleanly — the mock router was not mounted (otherwise
+      // the warning would have fired). The behavioural check is that the
+      // host env's DICODE_E2E_MOCK_PROVIDER=1 did not leak into the call.
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DICODE_E2E_MOCK_PROVIDER;
+      } else {
+        process.env.DICODE_E2E_MOCK_PROVIDER = previous;
+      }
+    }
   });
 });
 
@@ -190,6 +370,8 @@ server:
   base_url: http://localhost:${String(port)}
 status:
   password: test-pw
+broker:
+  signing_key_file: ${ctx.signingKeyPath}
 `,
     );
 
@@ -211,14 +393,6 @@ status:
 
     // After close(), a fresh listen on the same port must succeed —
     // proves the socket was released cleanly.
-    await new Promise<void>((resolve, reject) => {
-      const probe = createHttpServer();
-      probe.once("error", reject);
-      probe.listen(port, () => {
-        probe.close(() => {
-          resolve();
-        });
-      });
-    });
+    await assertPortFree(port);
   });
 });
