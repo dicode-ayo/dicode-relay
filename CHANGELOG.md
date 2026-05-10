@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.5...v0.1.6) (2026-05-10)
+
+
+### Features
+
+* extract startServer library entry + dryRun + 0.2.0 ([#71](https://github.com/dicode-ayo/dicode-relay/issues/71)) ([8d5a7fd](https://github.com/dicode-ayo/dicode-relay/commit/8d5a7fdc84e0b661f70a1417d5109651d211e10f))
+
 ## [0.1.5](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.4...v0.1.5) (2026-05-04)
 
 
