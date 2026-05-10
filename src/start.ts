@@ -248,8 +248,12 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
     forwardToClient(req, res, uuid, hookPath);
   });
 
-  // Status dashboard (password-protected)
-  const statusPassword = statusCfg.password !== "" ? statusCfg.password : undefined;
+  // Status dashboard. `statusCfg.password` is undefined when the YAML omits
+  // the key (or sets it to null) — `statusAuth(undefined)` then answers every
+  // /status and /api/status request with 404 ("status page not configured").
+  // Zod rejects an empty string at load time so we don't need to defensively
+  // map "" → undefined here.
+  const statusPassword = statusCfg.password;
   app.get("/status", statusAuth(statusPassword), (_req, res) => {
     res.type("html").send(renderStatusPage(metrics.snapshot()));
   });

@@ -74,16 +74,61 @@ const TlsSchema = z.object({
 const ServerSchema = z
   .object({
     port: z.number().int().default(5553),
-    base_url: z.string().default(""),
+    // base_url is optional (absent → fall back to http://localhost:<port>
+    // via the .transform below), but when explicitly set in YAML it must be a
+    // non-empty string. Catches the common footgun of writing
+    // `base_url: ${BASE_URL}` in relay.yaml with `BASE_URL` unset: env
+    // interpolation collapses to "", and the relay would silently advertise
+    // wss://localhost:<port>/u/... in the welcome message and break OAuth
+    // callback URLs in production.
+    //
+    // .nullish() (instead of .optional()) so YAML forms that produce `null`
+    // (`base_url:`, `base_url: ~`, `base_url: null`) are also accepted as
+    // "absent" — js-yaml parses an empty key value to `null`, not undefined,
+    // and .optional() alone would yield a generic "expected string, received
+    // null" error rather than treating it as the documented "omit to default".
+    // The .transform() collapses null → undefined so the outer .transform
+    // keeps working without a second null check.
+    base_url: z
+      .string()
+      .min(
+        1,
+        "server.base_url must be non-empty — set BASE_URL or remove the key to default to http://localhost:<port>",
+      )
+      .nullish()
+      .transform((v) => v ?? undefined),
     tls: TlsSchema.default(() => TlsSchema.parse({})),
   })
   .transform((s) => ({
     ...s,
-    base_url: s.base_url !== "" ? s.base_url : `http://localhost:${String(s.port)}`,
+    base_url:
+      s.base_url !== undefined && s.base_url !== ""
+        ? s.base_url
+        : `http://localhost:${String(s.port)}`,
   }));
 
 const StatusSchema = z.object({
-  password: z.string().default(""),
+  // password is optional (absent → /status returns 404, dashboard is disabled
+  // via statusAuth(undefined)), but when explicitly set in YAML it must be a
+  // non-empty string. This rejects the footgun of writing
+  // `password: ${STATUS_PASSWORD}` with STATUS_PASSWORD unset: env
+  // interpolation collapses to "", which the previous start.ts logic mapped
+  // back to "no password → no auth" and silently exposed the dashboard.
+  // Operators who want to disable the dashboard must omit the key.
+  //
+  // .nullish() so the common YAML forms `password:` (no value), `password: ~`,
+  // and `password: null` — all parsed by js-yaml as `null` — are treated as
+  // "absent" rather than producing a generic Zod "expected string, received
+  // null" error. The .transform() collapses null → undefined so downstream
+  // `statusAuth(statusCfg.password)` keeps receiving `undefined` for "off".
+  password: z
+    .string()
+    .min(
+      1,
+      "status.password must be non-empty — set STATUS_PASSWORD or remove the key to disable /status (returns 404)",
+    )
+    .nullish()
+    .transform((v) => v ?? undefined),
 });
 
 const RelaySchema = z.object({

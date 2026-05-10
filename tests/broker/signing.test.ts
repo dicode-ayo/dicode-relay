@@ -2,8 +2,9 @@
  * Broker signing key tests — key loading, signing, verification round-trip.
  */
 
-import { writeFileSync, unlinkSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync, existsSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -74,6 +75,75 @@ describe("loadBrokerSigningKey", () => {
       tmpKeyPath,
     );
     expect(key.publicKeyBase64).toBeTruthy();
+  });
+
+  it("throws ENOENT (does NOT auto-generate) when signing_key_file points at a missing file", () => {
+    // Operator-trusted path: a typo'd `signing_key_file` must surface ENOENT
+    // on first start rather than silently auto-generating at the wrong path
+    // (which would rotate the broker pubkey and break TOFU-pinned daemons —
+    // see issue #54). The legacy cwd-fallback below is the only auto-gen
+    // surface this loader exposes.
+    const baseTmp = mkdtempSync(join(tmpdir(), "dicode-relay-signing-"));
+    const targetPath = join(baseTmp, "non-existent-subdir", "broker-signing.key");
+    try {
+      expect(existsSync(dirname(targetPath))).toBe(false);
+
+      expect(() =>
+        loadBrokerSigningKey(
+          { BROKER_SIGNING_KEY_FILE: "", BROKER_SIGNING_KEY: "" },
+          process.cwd(),
+          targetPath,
+          true,
+        ),
+      ).toThrow(/broker\.signing_key_file points to a missing file/);
+
+      // Importantly: no file or parent dir was created as a side effect.
+      expect(existsSync(targetPath)).toBe(false);
+      expect(existsSync(dirname(targetPath))).toBe(false);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("mkdir -p's the parent directory on the legacy cwd-fallback auto-generate path", () => {
+    // The legacy fallback (no env, no inline, no YAML path) auto-generates a
+    // P-256 key under `<cwd>/broker-signing-key.pem`. If cwd itself is a
+    // freshly-created tmpdir whose parent path doesn't yet exist (or if a
+    // future caller passes a synthetic cwd via the second arg), writeFileSync
+    // would throw ENOENT. mkdir -p the parent so the narrow fix the brief
+    // intended actually fires here.
+    const baseTmp = mkdtempSync(join(tmpdir(), "dicode-relay-cwd-"));
+    const syntheticCwd = join(baseTmp, "fresh-subdir");
+    expect(existsSync(syntheticCwd)).toBe(false);
+    try {
+      const key = loadBrokerSigningKey(
+        { BROKER_SIGNING_KEY_FILE: "", BROKER_SIGNING_KEY: "" },
+        syntheticCwd,
+        "", // no YAML path → legacy fallback branch
+        true,
+      );
+      const autoPath = join(syntheticCwd, "broker-signing-key.pem");
+      expect(existsSync(autoPath)).toBe(true);
+      expect(key.publicKeyBase64).toBeTruthy();
+      const payload = buildDeliverySignaturePayload("t", "s", "e", "c", "n");
+      const sig = key.sign(payload);
+      expect(verifyDeliverySignature(key.publicKeyBase64, sig, "t", "s", "e", "c", "n")).toBe(true);
+      if (process.platform !== "win32") {
+        const mode = statSync(autoPath).mode & 0o777;
+        expect(mode).toBe(0o600);
+      }
+
+      // Second load must read the persisted key back (no rotation).
+      const second = loadBrokerSigningKey(
+        { BROKER_SIGNING_KEY_FILE: "", BROKER_SIGNING_KEY: "" },
+        syntheticCwd,
+        "",
+        true,
+      );
+      expect(second.publicKeyBase64).toBe(key.publicKeyBase64);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
   });
 
   it("env BROKER_SIGNING_KEY_FILE takes precedence over YAML signing_key_file", () => {
