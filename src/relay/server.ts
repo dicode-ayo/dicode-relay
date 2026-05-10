@@ -32,6 +32,7 @@ import {
   type Response as ResponseMessage,
   type ServerMessage,
 } from "./pb/relay_pb.js";
+import { uncompressedP256ToSpki } from "../shared/crypto.js";
 import type { ForwardResponse } from "../shared/protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -507,17 +508,5 @@ export class RelayServer extends EventEmitter {
 }
 
 // ---------------------------------------------------------------------------
-// DER encoding helper
-// ---------------------------------------------------------------------------
-
-/**
- * Wraps a raw 65-byte uncompressed P-256 public key into a DER-encoded
- * SubjectPublicKeyInfo structure so Node.js crypto can import it.
- */
-function uncompressedP256ToSpki(pubkey: Buffer): Buffer {
-  const header = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
-  return Buffer.concat([header, pubkey]);
-}
-
 // Re-export generated types for tests and external consumers.
 export type { Request, Response } from "./pb/relay_pb.js";
