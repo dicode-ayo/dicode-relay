@@ -27,6 +27,14 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./start": {
+      "types": "./dist/start.d.ts",
+      "import": "./dist/start.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    },
     "./client": {
       "types": "./dist/client/index.d.ts",
       "import": "./dist/client/index.js"

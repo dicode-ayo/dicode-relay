@@ -47,11 +47,15 @@ export const MOCK_PROVIDER_KEY = "mock";
  * The NODE_ENV match is case-insensitive and whitespace-tolerant so that
  * oddly-capitalised or copy-pasted values like "PRODUCTION" or
  * " production" still trip the refusal.
+ *
+ * Accepts an explicit `env` so library callers (`startServer({ env })`) can
+ * scope the mock decision to their supplied env without inheriting flags
+ * from the host `process.env`. Defaults to `process.env` for legacy callers.
  */
-export function isE2EMockEnabled(): boolean {
-  const nodeEnv = process.env.NODE_ENV?.trim().toLowerCase();
+export function isE2EMockEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const nodeEnv = env.NODE_ENV?.trim().toLowerCase();
   if (nodeEnv === "production") return false;
-  return process.env.DICODE_E2E_MOCK_PROVIDER === "1";
+  return env.DICODE_E2E_MOCK_PROVIDER === "1";
 }
 
 interface DeliverBody {
