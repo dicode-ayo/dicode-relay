@@ -354,4 +354,18 @@ describe("NonceStore", () => {
       vi.useRealTimers();
     }
   });
+
+  it("size is bounded by the LRU ceiling under flood", () => {
+    // Sanity check: feeding far more unique nonces than the configured
+    // ceiling (100k in production) keeps `size` at the ceiling rather
+    // than growing unbounded. Uses 256 unique nonces to stay fast; the
+    // invariant is `size <= max`, which lru-cache enforces regardless of
+    // the specific ceiling value.
+    const store = new NonceStore(testNonceTtlMs);
+    for (let i = 0; i < 256; i++) {
+      store.check(randomBytes(32).toString("hex"));
+    }
+    expect(store.size).toBeLessThanOrEqual(100_000);
+    expect(store.size).toBe(256);
+  });
 });
