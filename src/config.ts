@@ -119,33 +119,43 @@ export function defaultConfig(): RelayConfig {
 // Config loading
 // ---------------------------------------------------------------------------
 
-/** Determine the config file path from CLI args or env. */
-function resolveConfigPath(env: NodeJS.ProcessEnv): string {
-  const args = process.argv;
-  for (let i = 0; i < args.length - 1; i++) {
-    if (args[i] === "--config") {
-      const next = args[i + 1];
-      if (next !== undefined) return next;
-    }
-  }
+/**
+ * Determine the config file path.
+ *
+ * Resolution order:
+ *   1. Explicit `configPath` argument (highest priority — used by the CLI and
+ *      programmatic `startServer({ configPath })` callers).
+ *   2. `RELAY_CONFIG` env var.
+ *   3. `relay.yaml` in the current working directory.
+ *
+ * This function does NOT inspect `process.argv` — CLI argument parsing lives
+ * in the bin entrypoint (`src/index.ts`) so the library is pure with respect
+ * to argv. Library callers that need a different path pass it explicitly.
+ */
+function resolveConfigPath(env: NodeJS.ProcessEnv, configPath?: string): string {
+  if (configPath !== undefined && configPath !== "") return configPath;
   return env.RELAY_CONFIG ?? "relay.yaml";
 }
 
 /**
  * Load and validate the relay config.
  * Throws if the config file does not exist.
+ *
+ * @param env         env source for `${VAR}` interpolation (default: process.env)
+ * @param configPath  optional explicit path to the YAML file (overrides
+ *                    RELAY_CONFIG env / default `relay.yaml`)
  */
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
-  const configPath = resolveConfigPath(env);
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, configPath?: string): RelayConfig {
+  const path = resolveConfigPath(env, configPath);
 
-  if (!existsSync(configPath)) {
+  if (!existsSync(path)) {
     throw new Error(
-      `Config file not found: ${configPath}\n` +
+      `Config file not found: ${path}\n` +
         `Copy relay.yaml.example to relay.yaml and configure it for your environment.`,
     );
   }
 
-  const raw = readFileSync(configPath, "utf8");
+  const raw = readFileSync(path, "utf8");
   const parsed = yamlLoad(raw) as Record<string, unknown> | null;
   const resolved = resolveDeep(parsed ?? {}, env);
   return ConfigSchema.parse(resolved);

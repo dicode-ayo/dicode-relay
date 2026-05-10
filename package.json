@@ -1,6 +1,6 @@
 {
   "name": "dicode-relay",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "OAuth broker + WebSocket relay server for dicode",
   "keywords": [
     "dicode",
@@ -26,6 +26,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./start": {
+      "types": "./dist/start.d.ts",
+      "import": "./dist/start.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
     },
     "./client": {
       "types": "./dist/client/index.d.ts",
