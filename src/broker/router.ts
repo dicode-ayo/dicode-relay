@@ -10,6 +10,7 @@
  * the relay WebSocket.
  */
 
+import escapeHtml from "escape-html";
 import { Router, type Request, type Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import type { RelayServer } from "../relay/server.js";
@@ -300,13 +301,4 @@ async function handleCallback(
       .status(503)
       .send("<html><body><p>Daemon not connected. Please retry the OAuth flow.</p></body></html>");
   }
-}
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#x27;");
 }
