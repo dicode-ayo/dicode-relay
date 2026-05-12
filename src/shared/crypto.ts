@@ -77,9 +77,12 @@ export function buildSignedPayload(
 /**
  * Wraps a raw 65-byte uncompressed P-256 public key into a DER SubjectPublicKeyInfo.
  * Required by Node.js crypto to import raw EC keys.
+ *
+ * The 27-byte header is the fixed SPKI prefix for `ecPublicKey + prime256v1`.
+ * Part of the wire contract with the Go daemon — do not replace with an
+ * external package without re-verifying byte layout.
  */
-function uncompressedP256ToSpki(pubkey: Buffer): Buffer {
-  // Fixed 27-byte SPKI header for ecPublicKey + prime256v1
+export function uncompressedP256ToSpki(pubkey: Buffer): Buffer {
   const header = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
   return Buffer.concat([header, pubkey]);
 }
