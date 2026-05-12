@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.7](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.6...v0.1.7) (2026-05-12)
+
+
+### Bug Fixes
+
+* **broker, config:** mkdir signing-key dir + reject empty critical vars ([#73](https://github.com/dicode-ayo/dicode-relay/issues/73)) ([674c2ce](https://github.com/dicode-ayo/dicode-relay/commit/674c2ce9b568140198d0f6a852a8483c7d6c1566))
+
+
+### Refactors
+
+* **broker,status:** adopt escape-html for HTML escaping ([#76](https://github.com/dicode-ayo/dicode-relay/issues/76)) ([aa75bd3](https://github.com/dicode-ayo/dicode-relay/commit/aa75bd3001906921621f132eb1733289e7f7b9a0))
+* **relay,shared:** dedupe uncompressedP256ToSpki helper ([#77](https://github.com/dicode-ayo/dicode-relay/issues/77)) ([31c217a](https://github.com/dicode-ayo/dicode-relay/commit/31c217a89d4daea4a6d310252392d1b603f56947))
+* **relay:** adopt lru-cache for NonceStore with 100k ceiling ([#75](https://github.com/dicode-ayo/dicode-relay/issues/75)) ([ca021ee](https://github.com/dicode-ayo/dicode-relay/commit/ca021ee7e3ea8ecf46ad476d506ca9c8e9260fc2))
+
 ## [0.1.6](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.5...v0.1.6) (2026-05-10)
 
 
