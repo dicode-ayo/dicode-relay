@@ -1,6 +1,5 @@
 /**
- * Envelope-level error paths introduced by the protobuf refactor
- * (dicode-relay#57). Covers the two branches that fire before the
+ * Envelope-level error paths. Covers the two branches that fire before the
  * hello message can be verified, plus the status-code range guard
  * on the response side.
  */

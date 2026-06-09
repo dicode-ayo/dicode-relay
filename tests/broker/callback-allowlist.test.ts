@@ -1,5 +1,5 @@
 /**
- * OAuth callback allowlist — dicode-relay#44.
+ * OAuth callback allowlist.
  *
  * The callback URL is attacker-reachable: a malicious upstream OAuth
  * provider or an open-redirect exploited upstream could append extra

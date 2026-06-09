@@ -495,19 +495,11 @@ describe("mock routes absent when flag unset", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Regression: the e2e-mock router must NOT globally consume JSON bodies
+// The e2e-mock router must scope json() to its own routes, not globally.
 // ---------------------------------------------------------------------------
 //
-// The router mounts at the app root (so /connect/mock gets intercepted
-// before Grant). Until this guard was added, `router.use(json())` caused
-// every `application/json` request — including unrelated webhook forwards
-// like /u/:uuid/hooks/* — to have its body eaten by the mock router's
-// json middleware before reaching the actual forward handler. Bodies
-// silently arrived empty downstream.
-//
-// This test mounts the e2e-mock router alongside a raw-body POST handler
-// on an unrelated path and confirms the body flows through intact with
-// Content-Type: application/json.
+// Verifies that mounting the e2e-mock router at the app root does not
+// consume JSON bodies on unrelated routes (e.g. /u/:uuid/hooks/*).
 
 describe("e2e-mock router body-passthrough on unrelated routes", () => {
   let httpServer: Server;

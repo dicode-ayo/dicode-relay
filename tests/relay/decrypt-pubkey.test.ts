@@ -1,6 +1,6 @@
 /**
- * Handshake tests for the optional decrypt_pubkey field (dicode-core#104 /
- * dicode-relay#28). Real crypto, real in-process WebSocket connections.
+ * Handshake tests for the decrypt_pubkey field.
+ * Real crypto, real in-process WebSocket connections.
  */
 
 import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:crypto";

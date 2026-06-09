@@ -10,17 +10,16 @@
  *     `state` (the session ID created by /auth/mock), looks up the session,
  *     and redirects the browser to /callback/mock?state=…&access_token=…
  *     The existing /callback/:provider handler then encrypts and forwards
- *     the synthetic token to the daemon. This is the flow dicode-relay#31
- *     specifies, and it lets a test driver exercise the full daemon-issued
- *     build_auth_url → browser → broker → daemon round-trip.
+ *     the synthetic token to the daemon. Lets a test driver exercise the
+ *     full daemon-issued build_auth_url → browser → broker → daemon
+ *     round-trip.
  *
  *   POST /_test/deliver
  *     A lower-level primitive that bypasses /auth and /connect entirely.
  *     Takes { uuid, session_id, provider, tokens } directly, builds the
  *     ECIES envelope using the connected daemon's decrypt pubkey + the
  *     broker signing key, and forwards. Used for cross-implementation
- *     wire-shape testing (this is how dicode-core#151 — the broker-sig
- *     hash-depth mismatch — was uncovered).
+ *     wire-shape testing.
  */
 
 import type { Request, Response, Router } from "express";
@@ -83,11 +82,8 @@ export function buildE2EMockRouter(
     handleConnectMock(req, res, sessions);
   });
 
-  // Scope json() to this specific route. `router.use(json())` would apply
-  // to every request the router sees — and since the router is mounted at
-  // the app root (to run before Grant), it'd consume JSON bodies on
-  // unrelated routes like /u/:uuid/hooks/*, silently dropping webhook
-  // payloads that carry Content-Type: application/json.
+  // json() is scoped to this route only. The router mounts at the app root
+  // before Grant, so a global json() would consume bodies on unrelated routes.
   router.post("/_test/deliver", json(), (req: Request, res: Response) => {
     void handleDeliver(req, res, relay, brokerKey);
   });

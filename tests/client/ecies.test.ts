@@ -55,8 +55,8 @@ describe("ECIES round-trip with Web Crypto identity", () => {
       "oauth_token_delivery",
       Buffer.from("hi"),
     );
-    // Cast to satisfy the EciesMessageType union — the test deliberately uses
-    // a wrong label that won't match the AAD bound during encrypt.
+    // Cast to satisfy the EciesMessageType union — uses a wrong label that
+    // won't match the AAD bound during encrypt.
     await expect(
       eciesDecryptWebCrypto(id.decryptPrivateKey(), "session", "wrong_type" as never, env),
     ).rejects.toThrow();

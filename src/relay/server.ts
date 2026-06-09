@@ -55,7 +55,7 @@ export class ForwardTimeoutError extends Error {
 
 /**
  * Broker protocol version advertised in the welcome message.
- * Version 3 (dicode-core#195) means: generated-from-proto wire format.
+ * Version 3 means: generated-from-proto wire format.
  *   - headers: map<string, HeaderValues{values: repeated string}>
  *   - timestamp: int32 (so the JSON encoding is a number, not a quoted string)
  *   - envelope: {"<kind>": {...}} instead of flat {"type": "...", ...}
@@ -74,7 +74,7 @@ export interface ConnectedClient {
    *  signature verification (WSS handshake + /auth/:provider sigs). */
   pubkey: Buffer;
   /** 65-byte uncompressed P-256 public key used by the broker as the ECIES
-   *  recipient when encrypting OAuth token deliveries (dicode-core#104). */
+   *  recipient when encrypting OAuth token deliveries. */
   decryptPubkey: Buffer;
 }
 
@@ -358,10 +358,8 @@ export class RelayServer extends EventEmitter {
         return;
       }
       const response = envelope.kind.value;
-      // HTTP status sanity check — previously enforced by a Zod range (100–599),
-      // lost in the proto migration because proto3 int32 has no range. A rogue
-      // daemon emitting an out-of-range status could confuse the relay's HTTP
-      // caller. Drop rather than forward.
+      // HTTP status range guard (100–599). Proto3 int32 has no range constraint,
+      // so a rogue daemon could emit out-of-range values. Drop rather than forward.
       if (response.status < 100 || response.status > 599) {
         return;
       }
@@ -410,8 +408,8 @@ export class RelayServer extends EventEmitter {
     }
 
     // Step 1b: Validate decrypt_pubkey structurally and as an on-curve P-256
-    // point (dicode-core#104). Required — every daemon advertises a split
-    // sign/decrypt identity. Parse failures reject the handshake.
+    // point. Required — every daemon advertises a split sign/decrypt identity.
+    // Parse failures reject the handshake.
     if (hello.decryptPubkey === "") {
       return "decrypt_pubkey is required";
     }

@@ -103,13 +103,8 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   // Broker signing key
   // -------------------------------------------------------------------------
 
-  // Under dryRun, refuse to materialise a fresh signing key to disk. The
-  // intent of dryRun is "validate, don't commit to anything" — every external
-  // supervisor (and every test run) that calls `startServer({ dryRun: true })`
-  // would otherwise silently write `broker-signing-key.pem` into the
-  // supervisor's cwd, widening the open issue around unconfigured signing
-  // keys. When no env override or file is configured under dryRun, we derive
-  // an ephemeral in-memory key purely so the broker router can still wire up.
+  // dryRun must not write a signing key to disk — derive an ephemeral
+  // in-memory key instead so the broker router can still wire up.
   const allowAutoGenerate = opts.dryRun !== true;
   const brokerKey = loadBrokerSigningKey(
     env,
@@ -153,17 +148,15 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   const realProviders = buildProviderMap(config);
   const sessions = new SessionStore(brokerCfg.session_ttl_ms);
 
-  // Providers passed to the broker router (session creation in /auth/:provider).
-  // If the E2E mock flag is set, include "mock" here so /auth/mock is accepted.
+  // If the E2E mock flag is set, include "mock" so /auth/mock is accepted.
   // Grant must NOT receive the mock entry — /connect/mock is handled by the
-  // e2e-mock router, and Grant would otherwise try to dispatch it upstream.
+  // e2e-mock router.
   const brokerProviders = new Map<string, ProviderConfig>(realProviders);
   if (isE2EMockEnabled(env)) {
     brokerProviders.set(MOCK_PROVIDER_KEY, {
       grantKey: MOCK_PROVIDER_KEY,
-      // Obviously-fake placeholder — never reaches Grant (see buildGrantMiddleware
-      // call below, which is passed realProviders only). Exists solely to satisfy
-      // the non-empty check in providers.has/buildProviderMap invariants.
+      // Placeholder — never reaches Grant (realProviders only). Satisfies the
+      // providers.has non-empty check.
       clientId: "mock-e2e-not-a-real-credential",
       pkce: true,
       scopes: [],
@@ -171,8 +164,7 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
     console.warn(
       "broker: DICODE_E2E_MOCK_PROVIDER enabled — mock provider registered. DO NOT USE IN PRODUCTION.",
     );
-    // Mount BEFORE Grant so /connect/mock is intercepted and Grant never sees
-    // it. Also exposes /_test/deliver for low-level wire-shape testing.
+    // Mount before Grant so /connect/mock is intercepted first.
     app.use(buildE2EMockRouter(relayServer, sessions, brokerKey));
   }
 

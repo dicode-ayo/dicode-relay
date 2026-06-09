@@ -1,5 +1,5 @@
 /**
- * Broker session pubkey selection (dicode-core#104 / dicode-relay#28).
+ * Broker session pubkey selection.
  * When a daemon advertises decrypt_pubkey on hello, the OAuth session's
  * ECIES recipient must be the decrypt pubkey, not the sign pubkey.
  * When no decrypt_pubkey is advertised (pre-v2 daemon), the session falls
