@@ -7,12 +7,10 @@
 // Wire format is JSON (WebSocket text frames). protojson (Go) and
 // @bufbuild/protobuf's fromJson/toJson (Node) produce matching output.
 //
-// Protocol version: 3 (first generated-from-proto release). Bumping from v2
-// is mandatory because two on-wire shapes changed:
-//   - headers: previously a JSON object with string-array values, now nested
-//     through HeaderValues. Proto3 maps cannot hold repeated values directly.
-//   - timestamp: kept as int32 to keep protojson emitting it as a JSON number
-//     instead of a quoted string (its default encoding for int64).
+// Protocol version: 3 (generated-from-proto wire format).
+//   - headers: nested through HeaderValues (proto3 maps cannot hold repeated
+//     values directly).
+//   - timestamp: int32 so protojson emits a JSON number, not a quoted string.
 //
 // Both sides MUST reject connections where the peer advertises protocol < 3.
 
@@ -162,7 +160,7 @@ export type Hello = Message<"dicode.relay.v1.Hello"> & {
 
   /**
    * Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
-   * Used as the ECIES recipient on OAuth token delivery (dicode-core#104).
+   * Used as the ECIES recipient on OAuth token delivery.
    * Required — every daemon now ships with a split sign/decrypt identity.
    *
    * @generated from field: string decrypt_pubkey = 3;

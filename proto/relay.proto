@@ -57,7 +57,7 @@ message Hello {
   // Used for ECDSA verification (WSS handshake + /auth/:provider sigs).
   string pubkey = 2;
   // Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
-  // Used as the ECIES recipient on OAuth token delivery (dicode-core#104).
+  // Used as the ECIES recipient on OAuth token delivery.
   // Required — every daemon now ships with a split sign/decrypt identity.
   string decrypt_pubkey = 3;
   // Base64 std-encoded ECDSA P-256 ASN.1 DER signature.

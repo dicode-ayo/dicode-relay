@@ -36,7 +36,7 @@ function generateSigningIdentity(): {
   const pubkeyBytes = spki.subarray(spki.length - 65);
   const uuid = createHash("sha256").update(pubkeyBytes).digest("hex");
 
-  // Distinct decrypt key (dicode-core#104 — split identity is required).
+  // Distinct decrypt key — split sign/decrypt identity is required.
   const { publicKey: decryptPublicKey } = generateKeyPairSync("ec", {
     namedCurve: "prime256v1",
     publicKeyEncoding: { type: "spki", format: "der" },

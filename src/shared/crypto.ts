@@ -27,10 +27,8 @@ import { promisify } from "node:util";
 const hkdfAsync = promisify(hkdf);
 
 // ---------------------------------------------------------------------------
-// ECIES message type — ASCII-only by contract so that both
-// Buffer.from(type, "utf8") (TS) and []byte(type) (Go) produce
-// identical AAD bytes. A new envelope version must be introduced as a
-// new union member, not as a silent wire-format bump under the same label.
+// ECIES message type — ASCII-only so that Buffer.from(type, "utf8") (TS)
+// and []byte(type) (Go) produce identical AAD bytes.
 // ---------------------------------------------------------------------------
 
 /** Discriminated type labels for ECIES-encrypted message envelopes. */

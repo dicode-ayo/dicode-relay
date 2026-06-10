@@ -167,7 +167,7 @@ export function buildBrokerRouter(
 
     // Store session. session.pubkey is the ECIES recipient (daemon's decrypt
     // pubkey from hello). ECDSA verification above uses client.pubkey (the
-    // sign key). Split identity per dicode-core#104.
+    // sign key).
     sessions.set({
       sessionId: session,
       relayUuid: relay_uuid,
@@ -195,15 +195,9 @@ export function buildBrokerRouter(
   // -------------------------------------------------------------------------
   // GET /callback/:provider (Grant callback handler)
   // -------------------------------------------------------------------------
-  // Grant handles the code exchange and appends the token to the request.
-  // We pick it up here to encrypt and deliver to the daemon.
-  // -------------------------------------------------------------------------
 
   router.get("/callback/:provider", (req: Request, res: Response): void => {
-    // Grant appends the session to req.query.state, and the token to req.query.access_token
-    // The actual Grant callback is handled by Grant middleware before this route,
-    // which populates req.session or passes via query. With transport: 'querystring',
-    // Grant redirects to this callback URL with the token as query params.
+    // Grant (transport: 'querystring') redirects here with token as query params.
     void handleCallback(req, res, relay, sessions, brokerKey);
   });
 
@@ -240,15 +234,12 @@ async function handleCallback(
     return;
   }
 
-  // Build the token payload by allowlisting known OAuth response fields.
-  // The callback URL is attacker-reachable, so we must never ship the full
-  // `req.query` — unknown params (state, session metadata, injected junk)
-  // are dropped before encryption. See ALLOWED_TOKEN_FIELDS above.
+  // Allowlist known OAuth response fields — the callback URL is attacker-
+  // reachable, so unknown params must be dropped before encryption.
   const tokensToDeliver = filterCallbackTokenFields(req.query);
 
-  // Encrypt the token payload with ECIES for the daemon. The message type
-  // is bound into GCM's authenticated data so the daemon can never decrypt
-  // this envelope under a different type label — see crypto.ts.
+  // ECIES-encrypt for the daemon. The message type is bound into GCM's
+  // authenticated data to prevent cross-type decryption.
   const deliveryType = "oauth_token_delivery";
   const plaintext = Buffer.from(JSON.stringify(tokensToDeliver));
   let encrypted: Awaited<ReturnType<typeof eciesEncrypt>>;

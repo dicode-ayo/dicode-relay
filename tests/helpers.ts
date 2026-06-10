@@ -30,8 +30,8 @@ export const testNonceTtlMs = cfg.relay.nonce_ttl_ms;
 // ---------------------------------------------------------------------------
 // Protobuf-envelope wire helpers
 //
-// After dicode-core#195, the relay protocol is carried in an envelope with a
-// single top-level variant key (e.g. {"challenge": {...}}, {"hello": {...}}).
+// The relay protocol is carried in an envelope with a single top-level
+// variant key (e.g. {"challenge": {...}}, {"hello": {...}}).
 // Tests that build or parse raw WebSocket frames go through these helpers so
 // the envelope shape lives in one place.
 // ---------------------------------------------------------------------------

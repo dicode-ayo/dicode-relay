@@ -114,11 +114,8 @@ export function loadBrokerSigningKey(
         publicKeyEncoding: { type: "spki", format: "pem" },
         privateKeyEncoding: { type: "pkcs8", format: "pem" },
       });
-      // Safety: cwd may itself be a freshly-created path where the parent
-      // directory doesn't yet exist. mkdir -p before writeFileSync so we
-      // don't throw ENOENT on the legacy fallback. This is the narrow fix
-      // the original brief intended — the YAML-configured path branch
-      // above deliberately does NOT auto-generate (see #54 for context).
+      // cwd may be a freshly-created path where the parent directory doesn't
+      // yet exist. The YAML-configured path branch above does NOT auto-generate.
       mkdirSync(dirname(autoPath), { recursive: true });
       writeFileSync(autoPath, pair.privateKey, { mode: 0o600 });
       console.warn(
@@ -158,8 +155,8 @@ function loadKeyPair(pem: string) {
  *   sha256(type || session_id || ephemeral_pubkey || ciphertext || nonce)
  *
  * All fields are UTF-8 encoded (they're already base64/ASCII strings in
- * the envelope JSON). This is deliberately simple: the input is the
- * concatenation of the five immutable envelope fields in wire order.
+ * the envelope JSON). The input is the concatenation of the five immutable
+ * envelope fields in wire order.
  */
 export function buildDeliverySignaturePayload(
   type: string,
