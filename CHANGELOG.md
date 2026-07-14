@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.7...v0.1.8) (2026-07-14)
+
+
+### Bug Fixes
+
+* **client:** drop ws handshakeTimeout — it flaps the tunnel under Deno ([#91](https://github.com/dicode-ayo/dicode-relay/issues/91)) ([41fb098](https://github.com/dicode-ayo/dicode-relay/commit/41fb098a108c36cb1ceaf26e5371b2f9880de349))
+
 ## [0.1.7](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.6...v0.1.7) (2026-05-12)
 
 
