@@ -43,6 +43,8 @@ export interface RelayClientOptions {
   log: RelayClientLogger;
   /** Called whenever connection state changes. Use for status reporting. */
   onStatus?: (s: RelayStatus) => void;
+  /** Dial timeout in ms before a not-yet-open socket is abandoned. Default 15s. */
+  dialTimeoutMs?: number;
 }
 
 /**
@@ -83,6 +85,14 @@ export class RelayClient {
         backoffHandle = setTimeout(r, wait);
       });
       const aborted = new Promise<void>((r) => {
+        // An abort that landed *during* runOnce (e.g. mid-dial) leaves the
+        // signal already aborted here; addEventListener never fires
+        // retroactively, so without this the client would sleep the full
+        // backoff before noticing and exit slowly on shutdown.
+        if (signal?.aborted === true) {
+          r();
+          return;
+        }
         signal?.addEventListener(
           "abort",
           () => {
@@ -113,14 +123,22 @@ export class RelayClient {
     const { sock, detach } = adaptWs(ws);
 
     await new Promise<void>((resolve, reject) => {
+      // terminate() on a still-CONNECTING socket emits an 'error' on the next
+      // tick; cleanup() has already removed our 'error' listener, so without a
+      // catch-all that becomes an unhandled 'error' event (uncaughtException /
+      // process crash). Swallow it before aborting the dial.
+      const terminateQuietly = (): void => {
+        ws.once("error", () => {});
+        ws.terminate();
+      };
       const dialTimer = setTimeout((): void => {
         cleanup();
-        ws.terminate();
+        terminateQuietly();
         reject(new Error("dial timeout"));
-      }, DIAL_TIMEOUT_MS);
+      }, this.opts.dialTimeoutMs ?? DIAL_TIMEOUT_MS);
       const onAbort = (): void => {
         cleanup();
-        ws.terminate();
+        terminateQuietly();
         reject(new Error("aborted"));
       };
       const onOpen = (): void => {
