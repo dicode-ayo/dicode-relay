@@ -41,15 +41,13 @@ describe("GET /providers", () => {
 
     const app = express();
     app.get("/providers", (_req, res) => {
-      const list = Array.from(providerMap.entries()).map(
-        ([key, cfg]): PublicProviderInfo => ({
-          key,
-          pkce: cfg.pkce,
-          scopes: cfg.scopes,
-          secret_required: cfg.clientSecret !== undefined,
-          configured: cfg.clientId !== "",
-        }),
-      );
+      const list = Array.from(providerMap.entries()).map(([key, cfg]): PublicProviderInfo => ({
+        key,
+        pkce: cfg.pkce,
+        scopes: cfg.scopes,
+        secret_required: cfg.clientSecret !== undefined,
+        configured: cfg.clientId !== "",
+      }));
       res.json(list);
     });
 
@@ -115,15 +113,13 @@ describe("GET /providers", () => {
     // Mount a second server with an empty map and verify the response.
     const app = express();
     app.get("/providers", (_req, res) => {
-      const list = Array.from(map.entries()).map(
-        ([key, cfg]): PublicProviderInfo => ({
-          key,
-          pkce: cfg.pkce,
-          scopes: cfg.scopes,
-          secret_required: cfg.clientSecret !== undefined,
-          configured: cfg.clientId !== "",
-        }),
-      );
+      const list = Array.from(map.entries()).map(([key, cfg]): PublicProviderInfo => ({
+        key,
+        pkce: cfg.pkce,
+        scopes: cfg.scopes,
+        secret_required: cfg.clientSecret !== undefined,
+        configured: cfg.clientId !== "",
+      }));
       res.json(list);
     });
 
