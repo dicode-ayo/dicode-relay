@@ -43,6 +43,8 @@ export interface RelayClientOptions {
   log: RelayClientLogger;
   /** Called whenever connection state changes. Use for status reporting. */
   onStatus?: (s: RelayStatus) => void;
+  /** Dial timeout in ms before a not-yet-open socket is abandoned. Default 15s. */
+  dialTimeoutMs?: number;
 }
 
 /**
@@ -83,6 +85,14 @@ export class RelayClient {
         backoffHandle = setTimeout(r, wait);
       });
       const aborted = new Promise<void>((r) => {
+        // An abort that landed *during* runOnce (e.g. mid-dial) leaves the
+        // signal already aborted here; addEventListener never fires
+        // retroactively, so without this the client would sleep the full
+        // backoff before noticing and exit slowly on shutdown.
+        if (signal?.aborted === true) {
+          r();
+          return;
+        }
         signal?.addEventListener(
           "abort",
           () => {
@@ -97,7 +107,13 @@ export class RelayClient {
   }
 
   private async runOnce(status: RelayStatus, signal?: AbortSignal): Promise<void> {
-    const ws = new WebSocket(this.opts.serverURL, { handshakeTimeout: DIAL_TIMEOUT_MS });
+    // The dial timeout is enforced manually below rather than via ws's
+    // { handshakeTimeout } option: under Deno's node:http polyfill ws leaves its
+    // internal handshake timer armed after "open", so it later fires
+    // abortHandshake() on an already-nulled request (TypeError: reading
+    // 'setHeader' of null) and tears a healthy connection down ~DIAL_TIMEOUT_MS
+    // after connecting, causing a permanent reconnect flap.
+    const ws = new WebSocket(this.opts.serverURL);
 
     // Register the message adapter BEFORE awaiting "open". The relay server sends
     // a challenge frame immediately upon connection. If we registered the listener
@@ -107,9 +123,24 @@ export class RelayClient {
     const { sock, detach } = adaptWs(ws);
 
     await new Promise<void>((resolve, reject) => {
+      // terminate() on a still-CONNECTING socket emits an 'error' on the next
+      // tick; cleanup() has already removed our 'error' listener, so without a
+      // catch-all that becomes an unhandled 'error' event (uncaughtException /
+      // process crash). Swallow it before aborting the dial.
+      const terminateQuietly = (): void => {
+        ws.once("error", () => {
+          /* swallow the 'error' terminate() emits on a still-CONNECTING socket */
+        });
+        ws.terminate();
+      };
+      const dialTimer = setTimeout((): void => {
+        cleanup();
+        terminateQuietly();
+        reject(new Error("dial timeout"));
+      }, this.opts.dialTimeoutMs ?? DIAL_TIMEOUT_MS);
       const onAbort = (): void => {
         cleanup();
-        ws.terminate();
+        terminateQuietly();
         reject(new Error("aborted"));
       };
       const onOpen = (): void => {
@@ -125,6 +156,7 @@ export class RelayClient {
         reject(new Error("closed before open"));
       };
       const cleanup = (): void => {
+        clearTimeout(dialTimer);
         signal?.removeEventListener("abort", onAbort);
         ws.removeListener("open", onOpen);
         ws.removeListener("error", onError);
