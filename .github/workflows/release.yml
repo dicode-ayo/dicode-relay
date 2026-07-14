@@ -108,13 +108,16 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: "https://registry.npmjs.org"
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; node 22 ships npm 10.x.
+      - run: npm install -g npm@latest
       # --ignore-scripts on both install and publish: no transitive postinstall
-      # script ever runs in the job that carries NPM_TOKEN, closing the
-      # tamper-dist-before-publish supply-chain gap. We invoke `npm run build`
-      # explicitly, so losing package-script auto-execution is a non-issue.
+      # script runs in the publishing job, closing the tamper-dist-before-publish
+      # supply-chain gap. We invoke `npm run build` explicitly, so losing
+      # package-script auto-execution is a non-issue.
       - run: npm ci --ignore-scripts
       - run: npm run build
+      # No NODE_AUTH_TOKEN: auth is via OIDC token exchange against the trusted
+      # publisher registered for this package on npmjs.com (repo + this workflow
+      # filename). id-token: write above is what mints the OIDC token.
       - name: Publish to npm
         run: npm publish --ignore-scripts --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
