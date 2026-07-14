@@ -144,7 +144,7 @@ export function loadBrokerSigningKey(
 
 function loadKeyPair(pem: string) {
   const privateKey = createPrivateKey(pem);
-  const publicKey = createPublicKey(privateKey);
+  const publicKey = createPublicKey(pem);
   return { privateKey, publicKey };
 }
 

@@ -261,19 +261,17 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
 
   // Public provider metadata — no secret values exposed.
   app.get("/providers", (_req, res) => {
-    const list = Array.from(realProviders.entries()).map(
-      ([key, cfg]): PublicProviderInfo => ({
-        key,
-        pkce: cfg.pkce,
-        scopes: cfg.scopes,
-        secret_required: cfg.clientSecret !== undefined,
-        // buildProviderMap already skips providers with empty clientId, so every
-        // entry in realProviders has a non-empty clientId → always true here.
-        // The field exists for API forward-compatibility with a future
-        // "show unconfigured providers" mode.
-        configured: cfg.clientId !== "",
-      }),
-    );
+    const list = Array.from(realProviders.entries()).map(([key, cfg]): PublicProviderInfo => ({
+      key,
+      pkce: cfg.pkce,
+      scopes: cfg.scopes,
+      secret_required: cfg.clientSecret !== undefined,
+      // buildProviderMap already skips providers with empty clientId, so every
+      // entry in realProviders has a non-empty clientId → always true here.
+      // The field exists for API forward-compatibility with a future
+      // "show unconfigured providers" mode.
+      configured: cfg.clientId !== "",
+    }));
     res.json(list);
   });
 
