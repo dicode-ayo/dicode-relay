@@ -97,7 +97,13 @@ export class RelayClient {
   }
 
   private async runOnce(status: RelayStatus, signal?: AbortSignal): Promise<void> {
-    const ws = new WebSocket(this.opts.serverURL, { handshakeTimeout: DIAL_TIMEOUT_MS });
+    // The dial timeout is enforced manually below rather than via ws's
+    // { handshakeTimeout } option: under Deno's node:http polyfill ws leaves its
+    // internal handshake timer armed after "open", so it later fires
+    // abortHandshake() on an already-nulled request (TypeError: reading
+    // 'setHeader' of null) and tears a healthy connection down ~DIAL_TIMEOUT_MS
+    // after connecting, causing a permanent reconnect flap.
+    const ws = new WebSocket(this.opts.serverURL);
 
     // Register the message adapter BEFORE awaiting "open". The relay server sends
     // a challenge frame immediately upon connection. If we registered the listener
@@ -107,6 +113,11 @@ export class RelayClient {
     const { sock, detach } = adaptWs(ws);
 
     await new Promise<void>((resolve, reject) => {
+      const dialTimer = setTimeout((): void => {
+        cleanup();
+        ws.terminate();
+        reject(new Error("dial timeout"));
+      }, DIAL_TIMEOUT_MS);
       const onAbort = (): void => {
         cleanup();
         ws.terminate();
@@ -125,6 +136,7 @@ export class RelayClient {
         reject(new Error("closed before open"));
       };
       const cleanup = (): void => {
+        clearTimeout(dialTimer);
         signal?.removeEventListener("abort", onAbort);
         ws.removeListener("open", onOpen);
         ws.removeListener("error", onError);
