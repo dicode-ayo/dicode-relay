@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.8...v0.1.9) (2026-07-14)
+
+
+### Bug Fixes
+
+* **deps:** bump dev-dependencies group (hold typescript at 6.x for typescript-eslint peer) ([#96](https://github.com/dicode-ayo/dicode-relay/issues/96)) ([80fceeb](https://github.com/dicode-ayo/dicode-relay/commit/80fceeb2de82473f66aa5a7a1c697e25df9cb439))
+
 ## [0.1.8](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.7...v0.1.8) (2026-07-14)
 
 
