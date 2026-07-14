@@ -128,7 +128,9 @@ export class RelayClient {
       // catch-all that becomes an unhandled 'error' event (uncaughtException /
       // process crash). Swallow it before aborting the dial.
       const terminateQuietly = (): void => {
-        ws.once("error", () => {});
+        ws.once("error", () => {
+          /* swallow the 'error' terminate() emits on a still-CONNECTING socket */
+        });
         ws.terminate();
       };
       const dialTimer = setTimeout((): void => {
