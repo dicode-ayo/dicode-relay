@@ -4,4 +4,6 @@ coverage
 .remember
 relay.yaml
 broker-signing-key.pem
+relay-mtls-cert.pem
+relay-mtls-key.pem
 .claude/worktrees/

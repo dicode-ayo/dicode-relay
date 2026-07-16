@@ -9,7 +9,6 @@
  */
 
 import type {
-  ChallengeSchema,
   ClientMessageSchema,
   ErrorSchema,
   HeaderValuesSchema,
@@ -24,7 +23,6 @@ import type { MessageShape } from "@bufbuild/protobuf";
 export type ClientMessage = MessageShape<typeof ClientMessageSchema>;
 export type ServerMessage = MessageShape<typeof ServerMessageSchema>;
 
-export type ChallengeMessage = MessageShape<typeof ChallengeSchema>;
 export type HelloMessage = MessageShape<typeof HelloSchema>;
 export type WelcomeMessage = MessageShape<typeof WelcomeSchema>;
 export type ErrorMessage = MessageShape<typeof ErrorSchema>;
@@ -36,8 +34,7 @@ export type HeaderValues = MessageShape<typeof HeaderValuesSchema>;
  * OAuthTokenDeliveryPayload is the JSON body the broker POSTs to the daemon's
  * `/hooks/oauth-complete` webhook. It is transported INSIDE the tunnel's
  * Request.body (base64-encoded) and is NOT itself a ServerMessage variant —
- * so it stays hand-typed in TS to mirror the matching Go struct
- * (pkg/relay/oauth.go `OAuthTokenDeliveryPayload`).
+ * so it stays hand-typed in TS.
  *
  * The ciphertext has the 16-byte AES-GCM authentication tag appended; the
  * daemon splits the last 16 bytes off before passing to aesGCM.Open.
@@ -51,9 +48,10 @@ export interface OAuthTokenDeliveryPayload {
   ciphertext: string;
   /** Base64-encoded 12-byte AES-GCM nonce (IV). */
   nonce: string;
-  /** Base64-encoded ECDSA P-256 signature over
-   *  sha256(type || session_id || ephemeral_pubkey || ciphertext || nonce).
-   *  Signed by the broker's long-lived key announced in Welcome.broker_pubkey. */
+  /** Base64-encoded ECDSA P-256 signature over the v4 delivery preimage
+   *  (see buildDeliverySignaturePayload in signing.ts: domain label +
+   *  length-prefixed fields). Signed by the broker's long-lived key announced
+   *  in Welcome.broker_pubkey. */
   broker_sig?: string;
 }
 

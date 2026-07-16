@@ -1,20 +1,18 @@
 // Protocol schema for the dicode relay WebSocket tunnel.
 //
-// Single source of truth, generated on both sides:
-//   - dicode-core (Go)    via protoc-gen-go → pkg/relay/pb/*.pb.go
-//   - dicode-relay (Node) via protoc-gen-es → src/relay/pb/*.ts
+// Generated via protoc-gen-es → src/relay/pb/*.ts (`buf generate`).
 //
-// Wire format is JSON (WebSocket text frames). protojson (Go) and
-// @bufbuild/protobuf's fromJson/toJson (Node) produce matching output.
+// Wire format is JSON (WebSocket text frames) shaped by @bufbuild/protobuf's
+// fromJson/toJson over the generated oneof envelopes.
 //
-// Protocol version: 3 (first generated-from-proto release). Bumping from v2
-// is mandatory because two on-wire shapes changed:
-//   - headers: previously a JSON object with string-array values, now nested
-//     through HeaderValues. Proto3 maps cannot hold repeated values directly.
-//   - timestamp: kept as int32 to keep protojson emitting it as a JSON number
-//     instead of a quoted string (its default encoding for int64).
+// Protocol version: 4 (mTLS control channel). The daemon authenticates by
+// presenting a self-signed TLS client certificate wrapping its P-256 signing
+// key on the broker's dedicated mTLS listener; the broker derives
+// uuid = hex(sha256(uncompressed_cert_pubkey)) from the peer certificate.
+// There is no application-level challenge/signature exchange — channel
+// binding comes from TLS 1.3 CertificateVerify.
 //
-// Both sides MUST reject connections where the peer advertises protocol < 3.
+// Both sides MUST reject connections where the peer advertises protocol < 4.
 
 syntax = "proto3";
 
@@ -24,10 +22,12 @@ option go_package = "github.com/dicode/dicode/pkg/relay/pb;relaypb";
 
 // ServerMessage is any message the relay server sends to the daemon.
 // Wire form: a JSON object with one key identifying the variant, e.g.
-//   {"challenge": {"nonce": "..."}}.
+//   {"welcome": {"url": "..."}}.
 message ServerMessage {
+  // Field 1 was the v3 TOFU handshake challenge.
+  reserved 1;
+  reserved "challenge";
   oneof kind {
-    Challenge challenge = 1;
     Welcome welcome = 2;
     Error error = 3;
     Request request = 4;
@@ -42,41 +42,32 @@ message ClientMessage {
   }
 }
 
-// Challenge is the first frame the server sends: a 32-byte random nonce
-// hex-encoded (64 lowercase hex chars).
-message Challenge {
-  string nonce = 1;
-}
-
-// Hello is the daemon's handshake reply. The daemon signs
-// sha256(nonce_bytes || timestamp_be_uint64) with its ECDSA P-256 signing key.
+// Hello is the first frame the daemon sends after the TLS handshake.
+// The daemon's signing identity travels in its TLS client certificate;
+// hello only carries what TLS cannot: the ECIES recipient key.
 message Hello {
-  // hex(sha256(uncompressed_pubkey)) — 64 lowercase hex chars.
-  string uuid = 1;
-  // Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
-  // Used for ECDSA verification (WSS handshake + /auth/:provider sigs).
-  string pubkey = 2;
+  // Fields 1, 2, 4, 5 were the v3 TOFU handshake (uuid, sign pubkey,
+  // challenge signature, timestamp) — all derived from or replaced by the
+  // TLS client certificate.
+  reserved 1, 2, 4, 5;
+  reserved "uuid", "pubkey", "sig", "timestamp";
   // Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
   // Used as the ECIES recipient on OAuth token delivery.
-  // Required — every daemon now ships with a split sign/decrypt identity.
+  // Required — every daemon ships with a split sign/decrypt identity.
   string decrypt_pubkey = 3;
-  // Base64 std-encoded ECDSA P-256 ASN.1 DER signature.
-  string sig = 4;
-  // Unix timestamp in seconds. int32 keeps the JSON encoding a number.
-  int32 timestamp = 5;
 }
 
 // Welcome acknowledges a successful handshake and hands the daemon its
-// publicly reachable tunnel URL plus the broker's long-lived signing pubkey
-// for TOFU pinning.
+// publicly reachable tunnel URL plus the broker's delivery-signing pubkey.
+// The channel is TLS-server-authenticated, so the daemon can trust and
+// persist broker_pubkey on every connect (no TOFU pinning).
 message Welcome {
   // Full WSS URL for this client, e.g. wss://relay.dicode.app/u/<uuid>/hooks/
   string url = 1;
   // Base64-encoded SPKI DER public key the broker uses to sign delivery
   // envelopes. Absent for brokers that don't support OAuth delivery.
   optional string broker_pubkey = 2;
-  // Protocol version announced by the broker. v3 means "types generated from
-  // proto". Daemons that require >= 3 for OAuth read this on welcome.
+  // Protocol version announced by the broker. Daemons refuse < 4.
   optional int32 protocol = 3;
 }
 
@@ -130,8 +121,9 @@ message OAuthTokenDelivery {
   string ciphertext = 3;
   // Base64-encoded 12-byte AES-GCM nonce (IV).
   string nonce = 4;
-  // Base64-encoded ECDSA P-256 signature over
-  // sha256(session_id || ephemeral_pubkey || ciphertext || nonce). Signed by
-  // the broker's long-lived key announced in Welcome.broker_pubkey.
+  // Base64-encoded ECDSA P-256 signature over the v4 delivery preimage
+  // (see shared/signing.ts buildDeliverySignaturePayload: domain label +
+  // length-prefixed fields). Signed by the broker's long-lived key announced
+  // in Welcome.broker_pubkey.
   optional string broker_sig = 5;
 }

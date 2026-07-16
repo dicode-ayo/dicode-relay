@@ -38,17 +38,31 @@ export type EciesMessageType = "oauth_token_delivery";
 // buildSignedPayload
 // ---------------------------------------------------------------------------
 
+/** Domain-separation label for the OAuth auth-request signature (v4). */
+const AUTH_REQUEST_LABEL = Buffer.from("dicode/oauth-auth-request/v4", "utf8");
+
+/** uint32-BE length prefix followed by the field bytes. Length-prefixing
+ *  makes the concatenated preimage injective — no field-boundary ambiguity
+ *  when a field is added or is variable-length. */
+export function lengthPrefixed(field: Buffer): Buffer {
+  const len = Buffer.allocUnsafe(4);
+  len.writeUInt32BE(field.length);
+  return Buffer.concat([len, field]);
+}
+
 /**
  * Constructs the byte sequence that the daemon signs when initiating an
  * OAuth flow via the broker. Must match what the daemon constructs exactly.
  *
  * sha256(
- *   session_id_bytes        (16 bytes — UUID v4, hex-decoded, dashes stripped)
- *   pkce_challenge_bytes    (base64url-decoded)
- *   relay_uuid_bytes        (32 bytes — 64 hex chars decoded)
- *   provider_utf8_bytes     (UTF-8 encoded provider name)
- *   timestamp_be_uint64     (8 bytes, big-endian)
+ *   "dicode/oauth-auth-request/v4"      (domain label, no prefix)
+ *   lp(session_id_bytes)                (16 bytes — UUID v4, hex-decoded, dashes stripped)
+ *   lp(pkce_challenge_bytes)            (base64url-decoded)
+ *   lp(relay_uuid_bytes)                (32 bytes — 64 hex chars decoded)
+ *   lp(provider_utf8_bytes)             (UTF-8 encoded provider name)
+ *   timestamp_be_uint64                 (8 bytes, big-endian, fixed-width — no prefix)
  * )
+ * where lp(x) = uint32_be(len(x)) || x.
  */
 export function buildSignedPayload(
   sessionId: string,
@@ -60,10 +74,11 @@ export function buildSignedPayload(
   const ts = Buffer.allocUnsafe(8);
   ts.writeBigUInt64BE(BigInt(timestamp));
   return createHash("sha256")
-    .update(Buffer.from(sessionId.replace(/-/g, ""), "hex"))
-    .update(Buffer.from(pkceChallenge, "base64url"))
-    .update(Buffer.from(relayUuid, "hex"))
-    .update(Buffer.from(provider, "utf8"))
+    .update(AUTH_REQUEST_LABEL)
+    .update(lengthPrefixed(Buffer.from(sessionId.replace(/-/g, ""), "hex")))
+    .update(lengthPrefixed(Buffer.from(pkceChallenge, "base64url")))
+    .update(lengthPrefixed(Buffer.from(relayUuid, "hex")))
+    .update(lengthPrefixed(Buffer.from(provider, "utf8")))
     .update(ts)
     .digest();
 }
@@ -73,16 +88,22 @@ export function buildSignedPayload(
 // ---------------------------------------------------------------------------
 
 /**
+ * The fixed 26-byte SPKI DER prefix for `ecPublicKey + prime256v1`. A P-256
+ * SPKI is this header followed by the 65-byte uncompressed point. Part of the
+ * wire contract — do not replace with an external package without
+ * re-verifying byte layout.
+ */
+export const P256_SPKI_HEADER = Buffer.from(
+  "3059301306072a8648ce3d020106082a8648ce3d030107034200",
+  "hex",
+);
+
+/**
  * Wraps a raw 65-byte uncompressed P-256 public key into a DER SubjectPublicKeyInfo.
  * Required by Node.js crypto to import raw EC keys.
- *
- * The 27-byte header is the fixed SPKI prefix for `ecPublicKey + prime256v1`.
- * Part of the wire contract with the Go daemon — do not replace with an
- * external package without re-verifying byte layout.
  */
 export function uncompressedP256ToSpki(pubkey: Buffer): Buffer {
-  const header = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
-  return Buffer.concat([header, pubkey]);
+  return Buffer.concat([P256_SPKI_HEADER, pubkey]);
 }
 
 /**

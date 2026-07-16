@@ -1,5 +1,6 @@
 import type { webcrypto } from "node:crypto";
 import { buildSignedPayload } from "../shared/crypto.js";
+import { mintClientCertFromKeys, type GeneratedCert } from "../shared/certs.js";
 
 type JsonWebKey = webcrypto.JsonWebKey;
 
@@ -96,18 +97,17 @@ export class Identity {
     );
   }
 
-  async signChallenge(nonceHex: string, ts: number): Promise<string> {
-    const nonce = hexToAB(nonceHex);
-    const tsBuf = new DataView(new ArrayBuffer(8));
-    tsBuf.setBigUint64(0, BigInt(ts), false);
-    const msg = concatAB(nonce, tsBuf.buffer);
-    // Web Crypto's subtle.sign({hash: "SHA-256"}) hashes the input internally — pass raw bytes, not a pre-computed digest.
-    const p1363 = await crypto.subtle.sign(
-      { name: "ECDSA", hash: "SHA-256" },
-      this.signKey.privateKey,
-      msg,
+  /**
+   * Mint a self-signed X.509 client certificate wrapping the sign key, for
+   * the broker's mTLS listener. Only the SPKI matters to the broker (it
+   * derives uuid = sha256(pubkey) from the peer cert), so the cert is
+   * regenerated per boot and never persisted.
+   */
+  async mintClientCert(): Promise<GeneratedCert> {
+    return mintClientCertFromKeys(
+      { privateKey: this.signKey.privateKey, publicKey: this.signKey.publicKey },
+      this.uuid,
     );
-    return abToB64(p1363ToDer(new Uint8Array(p1363)));
   }
 
   async signAuthPayload(
@@ -117,12 +117,11 @@ export class Identity {
     ts: number,
   ): Promise<string> {
     const payloadBuf = buildSignedPayload(sessionId, challenge, this.uuid, provider, ts);
-    // `buildSignedPayload` returns sha256(fields) — a 32-byte digest.
+    // `buildSignedPayload` returns sha256(label + fields) — a 32-byte digest.
     // Web Crypto's subtle.sign({hash:"SHA-256"}) hashes its input once internally,
-    // so the resulting signature is over sha256(sha256(fields)). The broker verifies
-    // via Node's createVerify("SHA256").update(buildSignedPayload(...)) which also
-    // hashes the digest once, giving the same sha256(sha256(fields)) preimage.
-    // This matches the Go reference (pkg/relay/oauth.go SignAuthPayload).
+    // so the resulting signature is over sha256(sha256(label + fields)). The broker
+    // verifies via Node's createVerify("SHA256").update(buildSignedPayload(...))
+    // which also hashes the digest once, giving the same double-hash preimage.
     // Copy into a fresh Uint8Array to satisfy Web Crypto's strict BufferSource constraint.
     const payload = new Uint8Array(payloadBuf);
     const p1363 = await crypto.subtle.sign(
@@ -131,21 +130,6 @@ export class Identity {
       payload,
     );
     return abToB64(p1363ToDer(new Uint8Array(p1363)));
-  }
-
-  async verifyOwnSignature(nonceHex: string, ts: number, sigDerB64: string): Promise<boolean> {
-    const nonce = hexToAB(nonceHex);
-    const tsBuf = new DataView(new ArrayBuffer(8));
-    tsBuf.setBigUint64(0, BigInt(ts), false);
-    const msg = concatAB(nonce, tsBuf.buffer);
-    const sig = derToP1363(new Uint8Array(b64ToAB(sigDerB64)));
-    // Web Crypto's subtle.verify({hash: "SHA-256"}) hashes the input internally — pass raw bytes, not a pre-computed digest.
-    return crypto.subtle.verify(
-      { name: "ECDSA", hash: "SHA-256" },
-      this.signKey.publicKey,
-      sig,
-      msg,
-    );
   }
 
   decryptPrivateKey(): webcrypto.CryptoKey {
@@ -194,26 +178,7 @@ function abToB64(ab: ArrayBuffer): string {
   return btoa(s);
 }
 
-/** Decode a hex string to a fresh ArrayBuffer. */
-function hexToAB(hex: string): ArrayBuffer {
-  const ab = new ArrayBuffer(hex.length / 2);
-  const view = new Uint8Array(ab);
-  for (let i = 0; i < view.length; i++) {
-    view[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return ab;
-}
-
-/** Concatenate two ArrayBuffers. */
-function concatAB(a: ArrayBuffer, b: ArrayBuffer): ArrayBuffer {
-  const out = new ArrayBuffer(a.byteLength + b.byteLength);
-  const view = new Uint8Array(out);
-  view.set(new Uint8Array(a), 0);
-  view.set(new Uint8Array(b), a.byteLength);
-  return out;
-}
-
-// IEEE P1363 (raw r||s) <-> ASN.1 DER (SEQUENCE { INTEGER, INTEGER }) for P-256.
+// IEEE P1363 (raw r||s) -> ASN.1 DER (SEQUENCE { INTEGER, INTEGER }) for P-256.
 function p1363ToDer(p1363: Uint8Array): ArrayBuffer {
   const r = trimAndPad(p1363.slice(0, 32));
   const s = trimAndPad(p1363.slice(32, 64));
@@ -232,32 +197,6 @@ function p1363ToDer(p1363: Uint8Array): ArrayBuffer {
   return out.buffer;
 }
 
-function derToP1363(der: Uint8Array): ArrayBuffer {
-  if (der[0] !== 0x30) throw new Error("not a DER SEQUENCE");
-  // P-256 ECDSA signatures are always ≤ 72 bytes, so the SEQUENCE length is
-  // always single-byte (< 0x80). Reject multi-byte length encodings as malformed.
-  if (der[1] === undefined || der[1] >= 0x80) throw new Error("invalid DER length");
-  let i = 2;
-  if (der[i] !== 0x02) throw new Error("expected INTEGER for r");
-  i++;
-  const rLen = der[i];
-  if (rLen === undefined) throw new Error("truncated DER: missing r length");
-  i++;
-  const r = der.slice(i, i + rLen);
-  i += rLen;
-  if (der[i] !== 0x02) throw new Error("expected INTEGER for s");
-  i++;
-  const sLen = der[i];
-  if (sLen === undefined) throw new Error("truncated DER: missing s length");
-  i++;
-  const s = der.slice(i, i + sLen);
-  const out = new ArrayBuffer(64);
-  const view = new Uint8Array(out);
-  view.set(padTo32(r), 0);
-  view.set(padTo32(s), 32);
-  return out;
-}
-
 /** Trim leading zeros and add a zero prefix if high bit is set (for DER INTEGER encoding). */
 function trimAndPad(int: Uint8Array): Uint8Array {
   let start = 0;
@@ -271,15 +210,4 @@ function trimAndPad(int: Uint8Array): Uint8Array {
     return padded;
   }
   return trimmed;
-}
-
-/** Remove DER INTEGER leading zeros and zero-pad to 32 bytes for P1363. */
-function padTo32(int: Uint8Array): Uint8Array {
-  let start = 0;
-  while (start < int.length - 1 && int[start] === 0) start++;
-  const trimmed = int.slice(start);
-  if (trimmed.length === 32) return trimmed;
-  const out = new Uint8Array(32);
-  out.set(trimmed, 32 - trimmed.length);
-  return out;
 }

@@ -1,181 +1,36 @@
 /**
- * Relay forwarding tests — in-process WebSocket connections, no mocks.
+ * Relay forwarding tests — real mTLS connections, no mocks.
  */
 
-import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WebSocket } from "ws";
+import { ClientNotConnectedError, ForwardTimeoutError } from "../../src/relay/server.js";
 import {
-  ClientNotConnectedError,
-  ForwardTimeoutError,
-  RelayServer,
-} from "../../src/relay/server.js";
-import type { Request } from "../../src/relay/pb/relay_pb.js";
-import { testRelayOpts } from "../helpers.js";
-
-// Test helpers for the protobuf envelope wire format. The server under test
-// emits `{request: {...}}` and expects `{response: {...}}`; headers are wrapped
-// in `{values: [...]}` per proto3 map constraints.
-
-function extractRequest(raw: Buffer | string): Request | null {
-  const msg = JSON.parse(typeof raw === "string" ? raw : raw.toString()) as Record<string, unknown>;
-  if (typeof msg.request !== "object" || msg.request === null) return null;
-  return msg.request as Request;
-}
-
-function responseEnvelope(resp: {
-  id: string;
-  status: number;
-  headers?: Record<string, string[]>;
-  body: string;
-}): string {
-  const wireHeaders: Record<string, { values: string[] }> = {};
-  for (const [k, v] of Object.entries(resp.headers ?? {})) {
-    wireHeaders[k] = { values: v };
-  }
-  return JSON.stringify({
-    response: { id: resp.id, status: resp.status, headers: wireHeaders, body: resp.body },
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function generateSigningIdentity(): {
-  uuid: string;
-  pubkeyBase64: string;
-  decryptPubkeyBase64: string;
-  sign: (message: Buffer) => string;
-} {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const spki = publicKey as Buffer;
-  const pubkeyBytes = spki.subarray(spki.length - 65);
-  const uuid = createHash("sha256").update(pubkeyBytes).digest("hex");
-
-  const { publicKey: decryptPublicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const decryptSpki = decryptPublicKey as Buffer;
-  const decryptPubkeyBytes = decryptSpki.subarray(decryptSpki.length - 65);
-
-  const sign = (message: Buffer): string => {
-    const signer = createSign("SHA256");
-    signer.update(message);
-    return signer.sign(privateKey, "base64");
-  };
-
-  return {
-    uuid,
-    pubkeyBase64: pubkeyBytes.toString("base64"),
-    decryptPubkeyBase64: decryptPubkeyBytes.toString("base64"),
-    sign,
-  };
-}
-
-function buildHelloPayload(nonce: string, timestamp: number): Buffer {
-  const nonceBytes = Buffer.from(nonce, "hex");
-  const tsBytes = Buffer.allocUnsafe(8);
-  tsBytes.writeBigUInt64BE(BigInt(timestamp));
-  return Buffer.concat([nonceBytes, tsBytes]);
-}
-
-/** Wait for the WebSocket to close. */
-function waitForClose(ws: WebSocket): Promise<void> {
-  return new Promise((resolve) => {
-    if (ws.readyState === WebSocket.CLOSED) {
-      resolve();
-      return;
-    }
-    ws.once("close", () => {
-      resolve();
-    });
-  });
-}
-
-/**
- * Perform a full handshake and return the connected WebSocket.
- */
-async function performHandshake(port: number): Promise<{ ws: WebSocket; uuid: string }> {
-  const identity = generateSigningIdentity();
-
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://localhost:${port.toString()}`);
-
-    ws.once("message", (data: Buffer | string) => {
-      const msg = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
-        string,
-        unknown
-      >;
-      const challenge = msg.challenge as { nonce: string } | undefined;
-      if (challenge === undefined) {
-        reject(new Error("Expected challenge envelope"));
-        return;
-      }
-
-      const timestamp = Math.floor(Date.now() / 1000);
-      const payload = buildHelloPayload(challenge.nonce, timestamp);
-      const sig = identity.sign(payload);
-
-      ws.send(
-        JSON.stringify({
-          hello: {
-            uuid: identity.uuid,
-            pubkey: identity.pubkeyBase64,
-            decrypt_pubkey: identity.decryptPubkeyBase64,
-            sig,
-            timestamp,
-          },
-        }),
-      );
-
-      ws.once("message", (data2: Buffer | string) => {
-        const welcomeEnv = JSON.parse(
-          typeof data2 === "string" ? data2 : data2.toString(),
-        ) as Record<string, unknown>;
-        if (welcomeEnv.welcome === undefined) {
-          reject(
-            new Error(`Expected welcome envelope, got keys=${Object.keys(welcomeEnv).join(",")}`),
-          );
-          return;
-        }
-        resolve({ ws, uuid: identity.uuid });
-      });
-    });
-
-    ws.once("error", reject);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+  startMtlsRelay,
+  testDaemon,
+  connectDaemon,
+  parseRequest,
+  responseEnvelope,
+  type MtlsRelayFixture,
+} from "../helpers.js";
 
 describe("Relay forwarding", () => {
-  let server: RelayServer;
-  let port: number;
+  let fixture: MtlsRelayFixture;
 
-  beforeEach(() => {
-    server = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
-    port = server.port;
+  beforeEach(async () => {
+    fixture = await startMtlsRelay({ baseUrl: "wss://relay.dicode.app" });
   });
 
   afterEach(async () => {
-    await server.close();
+    await fixture.close();
   });
 
   it("forward() sends request message to correct WebSocket client", async () => {
-    const { ws, uuid } = await performHandshake(port);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
 
-    const receivedMessages: Request[] = [];
+    const receivedMessages: { id: string; method: string; path: string; body: string }[] = [];
     ws.on("message", (data: Buffer | string) => {
-      const req = extractRequest(data);
+      const req = parseRequest(data);
       if (req === null) return;
       receivedMessages.push(req);
       ws.send(
@@ -188,8 +43,8 @@ describe("Relay forwarding", () => {
       );
     });
 
-    const result = await server.forward(
-      uuid,
+    const result = await fixture.relay.forward(
+      daemon.identity.uuid,
       "POST",
       "/hooks/oauth-complete",
       { "Content-Type": ["application/json"] },
@@ -201,14 +56,15 @@ describe("Relay forwarding", () => {
     expect(receivedMessages[0]?.path).toBe("/hooks/oauth-complete");
     expect(receivedMessages[0]?.method).toBe("POST");
 
-    ws.close();
+    ws.terminate();
   });
 
   it("client sends response, forward() resolves with response body", async () => {
-    const { ws, uuid } = await performHandshake(port);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
 
     ws.on("message", (data: Buffer | string) => {
-      const req = extractRequest(data);
+      const req = parseRequest(data);
       if (req === null) return;
       ws.send(
         responseEnvelope({
@@ -219,24 +75,30 @@ describe("Relay forwarding", () => {
       );
     });
 
-    const result = await server.forward(uuid, "POST", "/hooks/test", {}, Buffer.from("body"));
+    const result = await fixture.relay.forward(
+      daemon.identity.uuid,
+      "POST",
+      "/hooks/test",
+      {},
+      Buffer.from("body"),
+    );
 
     expect(result.status).toBe(201);
     expect(Buffer.from(result.body, "base64").toString()).toBe("created");
 
-    ws.close();
+    ws.terminate();
   });
 
   it("forward to unknown UUID throws ClientNotConnectedError", async () => {
-    await expect(server.forward("a".repeat(64), "GET", "/", {}, Buffer.alloc(0))).rejects.toThrow(
-      ClientNotConnectedError,
-    );
+    await expect(
+      fixture.relay.forward("a".repeat(64), "GET", "/", {}, Buffer.alloc(0)),
+    ).rejects.toThrow(ClientNotConnectedError);
   });
 
   it("forward to unknown UUID throws error with correct name", async () => {
-    await expect(server.forward("b".repeat(64), "GET", "/", {}, Buffer.alloc(0))).rejects.toThrow(
-      "Client not connected",
-    );
+    await expect(
+      fixture.relay.forward("b".repeat(64), "GET", "/", {}, Buffer.alloc(0)),
+    ).rejects.toThrow("Client not connected");
   });
 
   it("ForwardTimeoutError has correct name", () => {
@@ -252,24 +114,31 @@ describe("Relay forwarding", () => {
   });
 
   it("server.close() rejects pending forward promises", async () => {
-    // Create a separate server instance so closing it does not interfere with afterEach
-    const tempServer = new RelayServer(testRelayOpts({ baseUrl: "wss://test.local" }));
-    const { uuid } = await performHandshake(tempServer.port);
+    // Separate fixture so closing it does not interfere with afterEach.
+    const temp = await startMtlsRelay({ baseUrl: "wss://test.local" });
+    const daemon = await testDaemon(temp);
+    await connectDaemon(temp, daemon);
 
-    // Don't handle messages — let it hang
-    const forwardPromise = tempServer.forward(uuid, "POST", "/hooks/test", {}, Buffer.from("body"));
+    // Don't handle messages — let it hang.
+    const forwardPromise = temp.relay.forward(
+      daemon.identity.uuid,
+      "POST",
+      "/hooks/test",
+      {},
+      Buffer.from("body"),
+    );
 
-    // Close the server — should reject pending requests
-    await tempServer.close();
-
-    await expect(forwardPromise).rejects.toThrow();
+    const closing = temp.close();
+    await expect(forwardPromise).rejects.toThrow("Server closing");
+    await closing;
   });
 
   it("concurrent forwards to same client both resolve", async () => {
-    const { ws, uuid } = await performHandshake(port);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
 
     ws.on("message", (data: Buffer | string) => {
-      const req = extractRequest(data);
+      const req = parseRequest(data);
       if (req === null) return;
       // Respond asynchronously to test concurrency
       setTimeout(() => {
@@ -284,14 +153,13 @@ describe("Relay forwarding", () => {
     });
 
     const [r1, r2] = await Promise.all([
-      server.forward(uuid, "GET", "/path1", {}, Buffer.alloc(0)),
-      server.forward(uuid, "GET", "/path2", {}, Buffer.alloc(0)),
+      fixture.relay.forward(daemon.identity.uuid, "GET", "/path1", {}, Buffer.alloc(0)),
+      fixture.relay.forward(daemon.identity.uuid, "GET", "/path2", {}, Buffer.alloc(0)),
     ]);
 
     expect(Buffer.from(r1.body, "base64").toString()).toBe("/path1");
     expect(Buffer.from(r2.body, "base64").toString()).toBe("/path2");
 
-    ws.close();
-    await waitForClose(ws);
+    ws.terminate();
   });
 });

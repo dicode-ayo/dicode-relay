@@ -1,126 +1,45 @@
-import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WebSocket } from "ws";
-import { RelayServer } from "../../src/relay/server.js";
-import {
-  helloEnvelope,
-  parseChallenge,
-  parseError,
-  parseWelcome,
-  testRelayOpts,
-} from "../helpers.js";
-
-function generateSigningIdentity(): {
-  uuid: string;
-  pubkeyBase64: string;
-  decryptPubkeyBase64: string;
-  sign: (message: Buffer) => string;
-} {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const spki = publicKey as Buffer;
-  const pubkeyBytes = spki.subarray(spki.length - 65);
-  const uuid = createHash("sha256").update(pubkeyBytes).digest("hex");
-
-  const { publicKey: decryptPublicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const decryptSpki = decryptPublicKey as Buffer;
-  const decryptPubkeyBytes = decryptSpki.subarray(decryptSpki.length - 65);
-
-  const sign = (message: Buffer): string => {
-    const signer = createSign("SHA256");
-    signer.update(message);
-    return signer.sign(privateKey, "base64");
-  };
-  return {
-    uuid,
-    pubkeyBase64: pubkeyBytes.toString("base64"),
-    decryptPubkeyBase64: decryptPubkeyBytes.toString("base64"),
-    sign,
-  };
-}
-
-function performHandshake(
-  ws: WebSocket,
-  identity: ReturnType<typeof generateSigningIdentity>,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    ws.on("message", (data: Buffer | string) => {
-      const ch = parseChallenge(data);
-      if (ch !== null) {
-        const nonceBytes = Buffer.from(ch.nonce, "hex");
-        const timestamp = Math.floor(Date.now() / 1000);
-        const tsBytes = Buffer.allocUnsafe(8);
-        tsBytes.writeBigUInt64BE(BigInt(timestamp));
-        const sigMessage = Buffer.concat([nonceBytes, tsBytes]);
-        ws.send(
-          helloEnvelope({
-            uuid: identity.uuid,
-            pubkey: identity.pubkeyBase64,
-            decrypt_pubkey: identity.decryptPubkeyBase64,
-            sig: identity.sign(sigMessage),
-            timestamp,
-          }),
-        );
-        return;
-      }
-      if (parseWelcome(data) !== null) {
-        resolve();
-        return;
-      }
-      if (parseError(data) !== null) {
-        reject(new Error("handshake failed"));
-      }
-    });
-  });
-}
+import { startMtlsRelay, testDaemon, connectDaemon, type MtlsRelayFixture } from "../helpers.js";
 
 describe("RelayServer events", () => {
-  let server: RelayServer;
+  let fixture: MtlsRelayFixture;
 
-  beforeEach(() => {
-    server = new RelayServer(testRelayOpts({ port: 0 }));
+  beforeEach(async () => {
+    fixture = await startMtlsRelay();
   });
 
   afterEach(async () => {
-    await server.close();
+    await fixture.close();
   });
 
   it("emits client:connected on successful handshake", async () => {
-    const identity = generateSigningIdentity();
+    const daemon = await testDaemon(fixture);
     const connected = new Promise<string>((resolve) => {
-      server.on("client:connected", (uuid: string) => {
+      fixture.relay.once("client:connected", (uuid: string) => {
         resolve(uuid);
       });
     });
 
-    const ws = new WebSocket(`ws://localhost:${server.port.toString()}`);
-    await performHandshake(ws, identity);
+    const { ws } = await connectDaemon(fixture, daemon);
 
     const uuid = await connected;
-    expect(uuid).toBe(identity.uuid);
-    ws.close();
+    expect(uuid).toBe(daemon.identity.uuid);
+    ws.terminate();
   });
 
   it("emits client:disconnected when client closes connection", async () => {
-    const identity = generateSigningIdentity();
+    const daemon = await testDaemon(fixture);
     const disconnected = new Promise<string>((resolve) => {
-      server.on("client:disconnected", (uuid: string) => {
+      fixture.relay.once("client:disconnected", (uuid: string) => {
         resolve(uuid);
       });
     });
 
-    const ws = new WebSocket(`ws://localhost:${server.port.toString()}`);
-    await performHandshake(ws, identity);
+    const { ws } = await connectDaemon(fixture, daemon);
     ws.close();
 
     const uuid = await disconnected;
-    expect(uuid).toBe(identity.uuid);
+    expect(uuid).toBe(daemon.identity.uuid);
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(false);
   });
 });

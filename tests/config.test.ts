@@ -21,9 +21,15 @@ describe("defaultConfig", () => {
     expect(cfg.relay.ping_interval_ms).toBe(30_000);
     expect(cfg.relay.pong_timeout_ms).toBe(10_000);
     expect(cfg.relay.request_timeout_ms).toBe(30_000);
-    expect(cfg.relay.nonce_ttl_ms).toBe(60_000);
     expect(cfg.broker.session_ttl_ms).toBe(300_000);
     expect(cfg.broker.providers).toEqual({});
+  });
+
+  it("defaults the mTLS control-channel listener to port 5554 with no cert files", () => {
+    const cfg = defaultConfig();
+    expect(cfg.server.mtls.port).toBe(5554);
+    expect(cfg.server.mtls.cert_file).toBe("");
+    expect(cfg.server.mtls.key_file).toBe("");
   });
 });
 
@@ -98,6 +104,34 @@ broker:
 
     const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
     expect(cfg.server.base_url).toBe("http://localhost:4444");
+  });
+
+  it("parses server.mtls settings from YAML", () => {
+    writeFileSync(
+      tmpPath,
+      `
+server:
+  port: 9999
+  mtls:
+    port: 6001
+    cert_file: /etc/relay/mtls-cert.pem
+    key_file: /etc/relay/mtls-key.pem
+`,
+    );
+
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.server.mtls.port).toBe(6001);
+    expect(cfg.server.mtls.cert_file).toBe("/etc/relay/mtls-cert.pem");
+    expect(cfg.server.mtls.key_file).toBe("/etc/relay/mtls-key.pem");
+  });
+
+  it("applies mtls defaults for keys omitted from a partial mtls block", () => {
+    writeFileSync(tmpPath, "server:\n  mtls:\n    port: 6002\n");
+
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.server.mtls.port).toBe(6002);
+    expect(cfg.server.mtls.cert_file).toBe("");
+    expect(cfg.server.mtls.key_file).toBe("");
   });
 
   it("throws when config file does not exist", () => {
