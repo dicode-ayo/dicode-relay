@@ -9,6 +9,7 @@ import { newBackoff } from "./backoff.js";
 
 const STABLE_MS = 10_000;
 const DIAL_TIMEOUT_MS = 15_000;
+const HANDSHAKE_TIMEOUT_MS = 15_000;
 
 /** WS close codes the broker uses for mTLS admission failures
  *  (mirrors CLOSE_* in relay/server.ts). */
@@ -66,6 +67,10 @@ export interface RelayClientOptions {
   onStatus?: (s: RelayStatus) => void;
   /** Dial timeout in ms before a not-yet-open socket is abandoned. Default 15s. */
   dialTimeoutMs?: number;
+  /** Timeout in ms for the app-level handshake (hello → welcome) after the
+   *  socket opens. Guards against a broker that accepts the connection but
+   *  never answers. Default 15s. */
+  handshakeTimeoutMs?: number;
 }
 
 /**
@@ -212,7 +217,21 @@ export class RelayClient {
     ws.on("close", onAdmissionClose);
 
     try {
-      const hr = await runHandshake(sock, this.opts.identity);
+      // Deadline for the app-level handshake: a broker that accepts the WS
+      // but never sends welcome must not hang runOnce forever. adaptWs
+      // rejects pending recv() calls on socket error/close, and this timer
+      // covers the silent-but-healthy-socket case.
+      let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+      const hr = await Promise.race([
+        runHandshake(sock, this.opts.identity),
+        new Promise<never>((_, reject) => {
+          handshakeTimer = setTimeout(() => {
+            reject(new Error("handshake timeout"));
+          }, this.opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS);
+        }),
+      ]).finally(() => {
+        clearTimeout(handshakeTimer);
+      });
 
       // Await the consumer's broker-key persistence while the handshake
       // adapter's listener is still attached and buffering: any frame the
@@ -263,6 +282,13 @@ export class RelayClient {
 
   private serve(ws: WebSocket, signal?: AbortSignal): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      // The socket may have closed while runOnce was awaiting
+      // onBrokerPubkey — its 'close' already fired and will not fire again
+      // for the listener attached below.
+      if (ws.readyState === WebSocket.CLOSED) {
+        resolve();
+        return;
+      }
       const onAbort = (): void => {
         ws.terminate();
       };
@@ -324,16 +350,34 @@ export class RelayClient {
 /** Adapt the `ws` WebSocket to the SocketLike interface used by runHandshake. */
 function adaptWs(ws: WebSocket): { sock: SocketLike; detach: () => string[] } {
   const inbox: string[] = [];
-  const waiters: ((s: string) => void)[] = [];
+  const waiters: { resolve: (s: string) => void; reject: (err: Error) => void }[] = [];
+  let failure: Error | null = null;
 
   const onMessage = (data: Buffer | string): void => {
     const raw = typeof data === "string" ? data : data.toString("utf8");
     const next = waiters.shift();
-    if (next) next(raw);
+    if (next) next.resolve(raw);
     else inbox.push(raw);
+  };
+  // A socket error or close during the handshake must reject pending (and
+  // future) recv() calls — otherwise runOnce would await recv() forever and
+  // the reconnect loop would never fire. The error listener also keeps the
+  // ws EventEmitter from throwing on an unhandled 'error' in the window
+  // between the dial promise settling and serve() attaching its listeners.
+  const fail = (err: Error): void => {
+    failure ??= err;
+    for (const w of waiters.splice(0)) w.reject(err);
+  };
+  const onError = (err: Error): void => {
+    fail(err);
+  };
+  const onClose = (code: number): void => {
+    fail(new Error(`socket closed during handshake (code ${String(code)})`));
   };
 
   ws.on("message", onMessage);
+  ws.on("error", onError);
+  ws.on("close", onClose);
 
   return {
     sock: {
@@ -341,18 +385,26 @@ function adaptWs(ws: WebSocket): { sock: SocketLike; detach: () => string[] } {
         ws.send(s);
       },
       recv: () =>
-        new Promise<string>((r) => {
+        new Promise<string>((resolve, reject) => {
+          if (failure !== null) {
+            reject(failure);
+            return;
+          }
           const queued = inbox.shift();
-          if (queued !== undefined) r(queued);
-          else waiters.push(r);
+          if (queued !== undefined) resolve(queued);
+          else waiters.push({ resolve, reject });
         }),
     },
     detach: (): string[] => {
-      // Remove the handshake listener so it no longer buffers incoming frames.
-      // Return any frames that arrived after the final handshake message — they
-      // are pre-serve request frames that must be replayed into handleFrame so
-      // they are not silently lost during the handshake→serve transition gap.
+      // Remove the handshake listeners so they no longer buffer incoming
+      // frames or intercept lifecycle events (serve() owns those next).
+      // Return any frames that arrived after the final handshake message —
+      // they are pre-serve request frames that must be replayed into
+      // handleFrame so they are not silently lost during the
+      // handshake→serve transition gap.
       ws.removeListener("message", onMessage);
+      ws.removeListener("error", onError);
+      ws.removeListener("close", onClose);
       return inbox.splice(0);
     },
   };

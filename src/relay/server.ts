@@ -241,6 +241,15 @@ export class RelayServer extends EventEmitter {
   // ---------------------------------------------------------------------------
 
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
+    // A ws 'error' with no listener throws at the EventEmitter level and
+    // takes the whole broker down — and rejected connections (4401/4402)
+    // return before the lifecycle listeners below are attached, so a peer
+    // that aborts after rejection would otherwise crash the process. Attach
+    // the safety listener before anything can bail.
+    ws.on("error", () => {
+      ws.terminate();
+    });
+
     // Identity comes from the TLS peer certificate; extract it before
     // accepting any frames. getPeerX509Certificate() can be undefined when
     // the socket presented no certificate.

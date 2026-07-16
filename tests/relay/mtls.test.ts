@@ -8,6 +8,7 @@
 
 import { webcrypto, X509Certificate } from "node:crypto";
 import { Agent as HttpsAgent } from "node:https";
+import type { Socket } from "node:net";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import WebSocket from "ws";
 import * as x509 from "@peculiar/x509";
@@ -205,6 +206,49 @@ describe("mTLS admission", () => {
     const two = await connectDaemon(fixture, daemon);
     expect(two.welcome.url).toContain(daemon.identity.uuid);
     two.ws.terminate();
+  });
+
+  it("survives a peer that aborts the socket after a 4401 rejection (no process crash)", async () => {
+    // A rejected connection returns from handleConnection before the
+    // lifecycle listeners attach; a subsequent socket error must hit the
+    // early safety 'error' listener, not crash the broker via an unhandled
+    // EventEmitter 'error'.
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown): void => {
+      uncaught.push(e);
+    };
+    process.on("uncaughtException", onUncaught);
+    try {
+      const ws = new WebSocket(fixture.url, { ca: fixture.ca });
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error("no rejection observed"));
+        }, 5000);
+        // Abort the TCP socket the moment the rejection arrives — the
+        // broker's close-frame write then fails on a dead socket.
+        ws.on("message", () => {
+          const raw = (ws as unknown as { _socket?: Socket })._socket;
+          raw?.destroy();
+        });
+        ws.on("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        ws.on("error", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      // Give a potential broker-side 'error' event time to surface.
+      await new Promise((r) => setTimeout(r, 200));
+      expect(uncaught).toEqual([]);
+      // The broker must still be serving: a normal daemon connects fine.
+      const after = await connectDaemon(fixture, daemon);
+      expect(after.welcome.url).toContain(daemon.identity.uuid);
+      after.ws.terminate();
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
   });
 });
 

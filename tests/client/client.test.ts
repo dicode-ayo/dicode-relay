@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { createServer as createNetServer, type Socket } from "node:net";
 import type { AddressInfo } from "node:net";
+import { WebSocketServer } from "ws";
 
 import { Identity } from "../../src/client/identity.js";
 import { RelayClient, type RelayStatus } from "../../src/client/client.js";
 import { loadBrokerSigningKey, type BrokerSigningKey } from "../../src/shared/signing.js";
-import { startMtlsRelay, testDaemon, type MtlsRelayFixture, type TestDaemon } from "../helpers.js";
+import {
+  startMtlsRelay,
+  testDaemon,
+  testServerCert,
+  type MtlsRelayFixture,
+  type TestDaemon,
+} from "../helpers.js";
 
 function silentLogger() {
   const noop = (_msg: string, _meta?: Record<string, unknown>): void => {
@@ -221,6 +229,119 @@ describe("RelayClient end-to-end", () => {
     await runPromise.catch(() => undefined);
     await fixture.close();
     await localApp.close();
+  }, 10_000);
+
+  it("handshake timeout fires when the broker accepts but never answers (issue #92)", async () => {
+    // A real TLS+WS server that completes the upgrade and then stays silent —
+    // the v3 hang: recv() waited forever, runOnce never returned, the
+    // reconnect loop never fired.
+    const serverCert = await testServerCert();
+    const silent = createHttpsServer({
+      cert: serverCert.certPem,
+      key: serverCert.keyPem,
+      requestCert: true,
+      rejectUnauthorized: false,
+    });
+    const wss = new WebSocketServer({ server: silent });
+    wss.on("connection", () => {
+      /* accept and say nothing */
+    });
+    await new Promise<void>((r) => {
+      silent.listen(0, "127.0.0.1", () => {
+        r();
+      });
+    });
+    const port = (silent.address() as AddressInfo).port;
+
+    const id = await Identity.generate();
+    const cert = await id.mintClientCert();
+    const errors: string[] = [];
+    const ac = new AbortController();
+    const client = new RelayClient({
+      serverURL: `wss://127.0.0.1:${String(port)}/`,
+      localPort: 1,
+      identity: id,
+      tls: { certPem: cert.certPem, keyPem: cert.keyPem, ca: serverCert.certPem },
+      log: silentLogger(),
+      handshakeTimeoutMs: 200,
+      onStatus: (s) => {
+        if (s.last_error !== undefined) errors.push(s.last_error);
+      },
+    });
+    const runPromise = client.run(ac.signal);
+
+    // Without the deadline this would hang far past 200ms.
+    await new Promise((r) => setTimeout(r, 800));
+    ac.abort();
+    await Promise.race([
+      runPromise.catch(() => undefined),
+      new Promise((r) => setTimeout(r, 3_000)),
+    ]);
+    await new Promise<void>((r) => {
+      wss.close(() => {
+        silent.close(() => {
+          r();
+        });
+      });
+    });
+
+    expect(errors.some((e) => e.includes("handshake timeout"))).toBe(true);
+  }, 10_000);
+
+  it("socket close during handshake rejects promptly instead of hanging recv()", async () => {
+    // Broker accepts the WS then immediately closes it without a welcome.
+    const serverCert = await testServerCert();
+    const slammer = createHttpsServer({
+      cert: serverCert.certPem,
+      key: serverCert.keyPem,
+      requestCert: true,
+      rejectUnauthorized: false,
+    });
+    const wss = new WebSocketServer({ server: slammer });
+    wss.on("connection", (ws) => {
+      ws.close(1011, "go away");
+    });
+    await new Promise<void>((r) => {
+      slammer.listen(0, "127.0.0.1", () => {
+        r();
+      });
+    });
+    const port = (slammer.address() as AddressInfo).port;
+
+    const id = await Identity.generate();
+    const cert = await id.mintClientCert();
+    const errors: string[] = [];
+    const ac = new AbortController();
+    const client = new RelayClient({
+      serverURL: `wss://127.0.0.1:${String(port)}/`,
+      localPort: 1,
+      identity: id,
+      tls: { certPem: cert.certPem, keyPem: cert.keyPem, ca: serverCert.certPem },
+      log: silentLogger(),
+      // Long deadline on purpose: the prompt rejection must come from the
+      // close-listener path, not from the handshake timer.
+      handshakeTimeoutMs: 8_000,
+      onStatus: (s) => {
+        if (s.last_error !== undefined) errors.push(s.last_error);
+      },
+    });
+    const runPromise = client.run(ac.signal);
+
+    await new Promise((r) => setTimeout(r, 500));
+    ac.abort();
+    await Promise.race([
+      runPromise.catch(() => undefined),
+      new Promise((r) => setTimeout(r, 3_000)),
+    ]);
+    await new Promise<void>((r) => {
+      wss.close(() => {
+        slammer.close(() => {
+          r();
+        });
+      });
+    });
+
+    expect(errors.some((e) => e.includes("socket closed during handshake"))).toBe(true);
   }, 10_000);
 
   it("dial timeout aborts cleanly and backs off — no unhandled 'error' crash", async () => {
