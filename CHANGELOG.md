@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.9...v0.2.0) (2026-07-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* protocol v4 is a hard cutover — v3 daemons cannot connect to a 0.2.0 broker and vice versa. RelayClientOptions.tofuCheckAndPin, Identity.signChallenge/verifyOwnSignature, relay.nonce_ttl_ms, and RelayServerOptions.port/timestampToleranceS/nonceTtlMs are removed; RelayServer now requires an mTLS https.Server; startServer binds two listeners and StartHandle gains mtlsServer. Daemons must dial the new server.mtls.port with TLS passthrough (never behind a TLS-terminating proxy).
+
+### Features
+
+* replace TOFU handshake with mTLS control channel (protocol v4) ([#104](https://github.com/dicode-ayo/dicode-relay/issues/104)) ([9e1b600](https://github.com/dicode-ayo/dicode-relay/commit/9e1b60056ff85050ada252cd2e7a9e26f4df78df)), closes [#98](https://github.com/dicode-ayo/dicode-relay/issues/98) [#92](https://github.com/dicode-ayo/dicode-relay/issues/92)
+
 ## [0.1.9](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.8...v0.1.9) (2026-07-14)
 
 
