@@ -6,11 +6,10 @@
  *  - POST /_test/deliver — low-level wire-shape primitive
  */
 
-import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import type { Server } from "node:http";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WebSocket } from "ws";
 import {
   buildE2EMockRouter,
   isE2EMockEnabled,
@@ -20,105 +19,20 @@ import { SessionStore } from "../../src/broker/sessions.js";
 import { verifyDeliverySignature } from "../../src/shared/signing.js";
 import type { BrokerSigningKey } from "../../src/shared/signing.js";
 import { loadBrokerSigningKey } from "../../src/shared/signing.js";
-import { RelayServer } from "../../src/relay/server.js";
-import { testRelayOpts, testSessionTtlMs } from "../helpers.js";
+import { Identity } from "../../src/client/identity.js";
+import {
+  startMtlsRelay,
+  testDaemon,
+  connectDaemon,
+  parseRequest,
+  responseEnvelope,
+  testSessionTtlMs,
+  type MtlsRelayFixture,
+} from "../helpers.js";
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-function generateSigningIdentity(): {
-  uuid: string;
-  pubkeyBase64: string;
-  decryptPubkeyBase64: string;
-  decryptPubkeyBytes: Buffer;
-  sign: (payload: Buffer) => string;
-} {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const spki = publicKey as Buffer;
-  const pubkeyBytes = Buffer.from(spki.subarray(spki.length - 65));
-  const uuid = createHash("sha256").update(pubkeyBytes).digest("hex");
-
-  const { publicKey: decryptPublicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const decryptSpki = decryptPublicKey as Buffer;
-  const decryptPubkeyBytes = Buffer.from(decryptSpki.subarray(decryptSpki.length - 65));
-
-  const sign = (payload: Buffer): string => {
-    const signer = createSign("SHA256");
-    signer.update(payload);
-    return signer.sign(privateKey, "base64");
-  };
-
-  return {
-    uuid,
-    pubkeyBase64: pubkeyBytes.toString("base64"),
-    decryptPubkeyBase64: decryptPubkeyBytes.toString("base64"),
-    decryptPubkeyBytes,
-    sign,
-  };
-}
-
-function buildHelloPayload(nonce: string, timestamp: number): Buffer {
-  const nonceBytes = Buffer.from(nonce, "hex");
-  const tsBytes = Buffer.allocUnsafe(8);
-  tsBytes.writeBigUInt64BE(BigInt(timestamp));
-  return Buffer.concat([nonceBytes, tsBytes]);
-}
-
-async function connectDaemon(
-  relayPort: number,
-  identity: ReturnType<typeof generateSigningIdentity>,
-): Promise<WebSocket> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://localhost:${relayPort.toString()}`);
-    ws.once("message", (data: Buffer | string) => {
-      const env = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
-        string,
-        unknown
-      >;
-      const challenge = env.challenge as { nonce: string } | undefined;
-      if (challenge === undefined) {
-        reject(new Error("Expected challenge envelope"));
-        return;
-      }
-      const timestamp = Math.floor(Date.now() / 1000);
-      const payload = buildHelloPayload(challenge.nonce, timestamp);
-      const sig = identity.sign(payload);
-
-      ws.send(
-        JSON.stringify({
-          hello: {
-            uuid: identity.uuid,
-            pubkey: identity.pubkeyBase64,
-            decrypt_pubkey: identity.decryptPubkeyBase64,
-            sig,
-            timestamp,
-          },
-        }),
-      );
-
-      ws.once("message", (data2: Buffer | string) => {
-        const env2 = JSON.parse(typeof data2 === "string" ? data2 : data2.toString()) as Record<
-          string,
-          unknown
-        >;
-        if (env2.welcome !== undefined) {
-          resolve(ws);
-        } else {
-          reject(new Error(`Expected welcome envelope, got keys=${Object.keys(env2).join(",")}`));
-        }
-      });
-    });
-    ws.once("error", reject);
-  });
+/** 65-byte uncompressed decrypt pubkey for session fixtures. */
+function decryptPubkeyBytes(identity: Identity): Buffer {
+  return Buffer.from(identity.decryptPubkeyB64, "base64");
 }
 
 // ---------------------------------------------------------------------------
@@ -126,14 +40,14 @@ async function connectDaemon(
 // ---------------------------------------------------------------------------
 
 describe("E2E mock router", () => {
-  let relayServer: RelayServer;
+  let fixture: MtlsRelayFixture;
   let httpServer: Server;
   let httpPort: number;
   let sessions: SessionStore;
   let brokerKey: BrokerSigningKey;
 
   beforeEach(async () => {
-    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.test.local" }));
+    fixture = await startMtlsRelay({ baseUrl: "wss://relay.test.local" });
     sessions = new SessionStore(testSessionTtlMs);
     // Use an inline PEM so tests do not touch disk.
     const pair = generateKeyPairSync("ec", {
@@ -144,7 +58,7 @@ describe("E2E mock router", () => {
     brokerKey = loadBrokerSigningKey({ BROKER_SIGNING_KEY: pair.privateKey }, "/tmp");
 
     const app = express();
-    app.use(buildE2EMockRouter(relayServer, sessions, brokerKey));
+    app.use(buildE2EMockRouter(fixture.relay, sessions, brokerKey));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -166,7 +80,7 @@ describe("E2E mock router", () => {
         }
       });
     });
-    await relayServer.close();
+    await fixture.close();
     sessions.clear();
   });
 
@@ -177,11 +91,11 @@ describe("E2E mock router", () => {
   describe("GET /connect/mock", () => {
     it("valid session → 302 redirect to /callback/mock with synthetic token", async () => {
       const sessionId = "550e8400-e29b-41d4-a716-446655440000";
-      const identity = generateSigningIdentity();
+      const identity = await Identity.generate();
       sessions.set({
         sessionId,
         relayUuid: identity.uuid,
-        pubkey: identity.decryptPubkeyBytes,
+        pubkey: decryptPubkeyBytes(identity),
         pkceChallenge: "challenge",
         provider: MOCK_PROVIDER_KEY,
         expiresAt: Date.now() + 60_000,
@@ -206,11 +120,11 @@ describe("E2E mock router", () => {
 
     it("expired session → 400", async () => {
       const sessionId = "bb0e8400-e29b-41d4-a716-446655440000";
-      const identity = generateSigningIdentity();
+      const identity = await Identity.generate();
       sessions.set({
         sessionId,
         relayUuid: identity.uuid,
-        pubkey: identity.decryptPubkeyBytes,
+        pubkey: decryptPubkeyBytes(identity),
         pkceChallenge: "challenge",
         provider: MOCK_PROVIDER_KEY,
         expiresAt: Date.now() - 1,
@@ -236,11 +150,11 @@ describe("E2E mock router", () => {
 
     it("session for a non-mock provider → 400", async () => {
       const sessionId = "aa0e8400-e29b-41d4-a716-446655440000";
-      const identity = generateSigningIdentity();
+      const identity = await Identity.generate();
       sessions.set({
         sessionId,
         relayUuid: identity.uuid,
-        pubkey: identity.decryptPubkeyBytes,
+        pubkey: decryptPubkeyBytes(identity),
         pkceChallenge: "challenge",
         provider: "github",
         expiresAt: Date.now() + 60_000,
@@ -282,26 +196,20 @@ describe("E2E mock router", () => {
     });
 
     it("connected daemon → encrypts + signs + forwards; daemon can verify sig", async () => {
-      const identity = generateSigningIdentity();
-      const ws = await connectDaemon(relayServer.port, identity);
+      const daemon = await testDaemon(fixture);
+      const { ws } = await connectDaemon(fixture, daemon);
 
       // Capture the request message that arrives at the daemon end.
       const forwarded: { id: string; path: string; body: string }[] = [];
       ws.on("message", (data: Buffer | string) => {
-        const env = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
-          string,
-          unknown
-        >;
-        const req = env.request as { id: string; path: string; body: string } | undefined;
-        if (req !== undefined) {
+        const req = parseRequest(data);
+        if (req !== null) {
           forwarded.push(req);
           ws.send(
-            JSON.stringify({
-              response: {
-                id: req.id,
-                status: 200,
-                body: Buffer.from("ok").toString("base64"),
-              },
+            responseEnvelope({
+              id: req.id,
+              status: 200,
+              body: Buffer.from("ok").toString("base64"),
             }),
           );
         }
@@ -312,7 +220,7 @@ describe("E2E mock router", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          uuid: identity.uuid,
+          uuid: daemon.identity.uuid,
           session_id: sessionId,
           provider: "github",
           tokens: { access_token: "test-token" },
@@ -353,7 +261,7 @@ describe("E2E mock router", () => {
         ),
       ).toBe(true);
 
-      ws.close();
+      ws.terminate();
     });
 
     it("rejects tokens=null as 400 (typeof null === 'object' quirk)", async () => {
@@ -504,12 +412,12 @@ describe("mock routes absent when flag unset", () => {
 describe("e2e-mock router body-passthrough on unrelated routes", () => {
   let httpServer: Server;
   let httpPort: number;
-  let relayServer: RelayServer;
+  let fixture: MtlsRelayFixture;
   let sessions: SessionStore;
   let brokerKey: BrokerSigningKey;
 
   beforeEach(async () => {
-    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.test.local" }));
+    fixture = await startMtlsRelay({ baseUrl: "wss://relay.test.local" });
     sessions = new SessionStore(testSessionTtlMs);
     const pair = generateKeyPairSync("ec", {
       namedCurve: "prime256v1",
@@ -521,7 +429,7 @@ describe("e2e-mock router body-passthrough on unrelated routes", () => {
     const app = express();
     // Mount the e2e-mock router FIRST (same order as src/index.ts when the
     // flag is on) — this is the configuration we're guarding against.
-    app.use(buildE2EMockRouter(relayServer, sessions, brokerKey));
+    app.use(buildE2EMockRouter(fixture.relay, sessions, brokerKey));
     // A simple downstream handler that reads the raw body — stands in for
     // the /u/:uuid/hooks/* forward handler in src/index.ts.
     app.post(
@@ -553,7 +461,7 @@ describe("e2e-mock router body-passthrough on unrelated routes", () => {
         }
       });
     });
-    await relayServer.close();
+    await fixture.close();
     sessions.clear();
   });
 

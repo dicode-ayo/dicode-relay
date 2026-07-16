@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ZodError } from "zod";
 import { startServer } from "../src/start.js";
+import { testServerCert } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -364,14 +365,27 @@ describe("startServer real listen", () => {
     rmSync(ctx.dir, { recursive: true, force: true });
   });
 
-  it("binds the configured port, serves /health, releases on close()", async () => {
+  it("binds both listeners, serves /health, releases on close()", async () => {
     const port = await pickPort();
+    const mtlsPort = await pickPort();
+    // Explicit mtls cert files inside the fixture dir — otherwise
+    // resolveMtlsCert would persist an auto-generated dev cert into the
+    // test runner's cwd.
+    const serverCert = await testServerCert();
+    const mtlsCertPath = join(ctx.dir, "mtls-cert.pem");
+    const mtlsKeyPath = join(ctx.dir, "mtls-key.pem");
+    writeFileSync(mtlsCertPath, serverCert.certPem);
+    writeFileSync(mtlsKeyPath, serverCert.keyPem, { mode: 0o600 });
     writeYaml(
       ctx,
       `
 server:
   port: ${String(port)}
   base_url: http://localhost:${String(port)}
+  mtls:
+    port: ${String(mtlsPort)}
+    cert_file: ${mtlsCertPath}
+    key_file: ${mtlsKeyPath}
 status:
   password: test-pw
 broker:
@@ -386,6 +400,7 @@ broker:
 
     try {
       expect(handle.httpServer.listening).toBe(true);
+      expect(handle.mtlsServer.listening).toBe(true);
       const { status, body } = await httpGetBody(port, "/health");
       expect(status).toBe(200);
       expect(JSON.parse(body)).toEqual({ ok: true });
@@ -394,9 +409,11 @@ broker:
     }
 
     expect(handle.httpServer.listening).toBe(false);
+    expect(handle.mtlsServer.listening).toBe(false);
 
-    // After close(), a fresh listen on the same port must succeed —
-    // proves the socket was released cleanly.
+    // After close(), a fresh listen on the same ports must succeed —
+    // proves the sockets were released cleanly.
     await assertPortFree(port);
+    await assertPortFree(mtlsPort);
   });
 });

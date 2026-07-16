@@ -1,131 +1,21 @@
 /**
- * Relay handshake tests — real crypto, real in-process WebSocket connections.
- * No mocks.
+ * Relay handshake tests — v4 welcome shape and frame-handling behavior
+ * around registration. Certificate admission (close codes, uuid derivation,
+ * duplicate reconnect) lives in mtls.test.ts.
  */
 
-import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WebSocket } from "ws";
-import { RelayServer } from "../../src/relay/server.js";
-import { NonceStore } from "../../src/relay/nonces.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import WebSocket from "ws";
+import { PROTOCOL_VERSION } from "../../src/relay/server.js";
 import {
-  helloEnvelope,
-  parseChallenge,
+  startMtlsRelay,
+  testDaemon,
+  connectDaemon,
   parseError,
-  parseWelcome,
-  testNonceTtlMs,
-  testRelayOpts,
+  parseRequest,
+  responseEnvelope,
+  type MtlsRelayFixture,
 } from "../helpers.js";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function generateSigningIdentity(): {
-  uuid: string;
-  pubkeyBase64: string;
-  decryptPubkeyBase64: string;
-  sign: (message: Buffer) => string;
-} {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const spki = publicKey as Buffer;
-  const pubkeyBytes = spki.subarray(spki.length - 65);
-  const uuid = createHash("sha256").update(pubkeyBytes).digest("hex");
-
-  // Distinct decrypt key — split sign/decrypt identity is required.
-  const { publicKey: decryptPublicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const decryptSpki = decryptPublicKey as Buffer;
-  const decryptPubkeyBytes = decryptSpki.subarray(decryptSpki.length - 65);
-
-  const sign = (message: Buffer): string => {
-    const signer = createSign("SHA256");
-    signer.update(message);
-    return signer.sign(privateKey, "base64");
-  };
-
-  return {
-    uuid,
-    pubkeyBase64: pubkeyBytes.toString("base64"),
-    decryptPubkeyBase64: decryptPubkeyBytes.toString("base64"),
-    sign,
-  };
-}
-
-function buildHelloPayload(nonce: string, timestamp: number): Buffer {
-  const nonceBytes = Buffer.from(nonce, "hex");
-  const tsBytes = Buffer.allocUnsafe(8);
-  tsBytes.writeBigUInt64BE(BigInt(timestamp));
-  return Buffer.concat([nonceBytes, tsBytes]);
-}
-
-/** Connect a WebSocket client and return the first message (the challenge). */
-function connectAndGetChallenge(port: number): Promise<{ ws: WebSocket; nonce: string }> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://localhost:${port.toString()}`);
-    ws.once("message", (data: Buffer | string) => {
-      const ch = parseChallenge(data);
-      if (ch === null) {
-        reject(new Error("Expected challenge envelope"));
-        return;
-      }
-      resolve({ ws, nonce: ch.nonce });
-    });
-    ws.once("error", reject);
-  });
-}
-
-// Hello body without the envelope wrapping — matches what helloEnvelope() takes.
-interface HelloBody {
-  uuid: string;
-  pubkey: string;
-  decrypt_pubkey?: string;
-  sig: string;
-  timestamp: number;
-}
-
-// Shape we return to callers. `type` is derived from the envelope key.
-interface HandshakeReply {
-  type: "welcome" | "error";
-  message?: string | undefined;
-  url?: string | undefined;
-}
-
-/** Send a hello envelope and wait for the next message (welcome or error). */
-function sendHelloAndWait(ws: WebSocket, hello: HelloBody): Promise<HandshakeReply> {
-  return new Promise((resolve, reject) => {
-    ws.send(
-      helloEnvelope({
-        uuid: hello.uuid,
-        pubkey: hello.pubkey,
-        decrypt_pubkey: hello.decrypt_pubkey ?? "",
-        sig: hello.sig,
-        timestamp: hello.timestamp,
-      }),
-    );
-    ws.once("message", (data: Buffer | string) => {
-      const w = parseWelcome(data);
-      if (w !== null) {
-        resolve({ type: "welcome", url: w.url as string | undefined });
-        return;
-      }
-      const e = parseError(data);
-      if (e !== null) {
-        resolve({ type: "error", message: e.message });
-        return;
-      }
-      reject(new Error(`unexpected envelope: ${data.toString()}`));
-    });
-    ws.once("error", reject);
-  });
-}
 
 /** Wait for the WebSocket to close. */
 function waitForClose(ws: WebSocket): Promise<void> {
@@ -140,241 +30,107 @@ function waitForClose(ws: WebSocket): Promise<void> {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+describe("Relay handshake (v4)", () => {
+  let fixture: MtlsRelayFixture;
 
-describe("Relay handshake", () => {
-  let server: RelayServer;
-  let port: number;
-
-  beforeEach(() => {
-    server = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
-    port = server.port;
+  beforeEach(async () => {
+    fixture = await startMtlsRelay({ baseUrl: "wss://relay.dicode.app" });
   });
 
   afterEach(async () => {
-    await server.close();
+    await fixture.close();
   });
 
-  it("valid handshake: client connects, receives welcome", async () => {
-    const identity = generateSigningIdentity();
-    const { ws, nonce } = await connectAndGetChallenge(port);
+  it("welcome carries the daemon hook URL and protocol 4", async () => {
+    const daemon = await testDaemon(fixture);
+    const { ws, welcome } = await connectDaemon(fixture, daemon);
 
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payload = buildHelloPayload(nonce, timestamp);
-    const sig = identity.sign(payload);
+    expect(welcome.url).toBe(`wss://relay.dicode.app/u/${daemon.identity.uuid}/hooks/`);
+    expect(welcome.protocol).toBe(PROTOCOL_VERSION);
+    expect(welcome.protocol).toBe(4);
+    // No broker signing key configured on this fixture → field absent.
+    expect(welcome.brokerPubkey).toBeUndefined();
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(true);
 
-    const response = await sendHelloAndWait(ws, {
-      uuid: identity.uuid,
-      pubkey: identity.pubkeyBase64,
-      decrypt_pubkey: identity.decryptPubkeyBase64,
-      sig,
-      timestamp,
+    ws.terminate();
+  });
+
+  it("welcome announces the broker delivery-signing pubkey when configured", async () => {
+    const announcing = await startMtlsRelay({
+      baseUrl: "wss://relay.dicode.app",
+      brokerPubkey: "TEST-BROKER-PUBKEY",
+    });
+    try {
+      const daemon = await testDaemon(announcing);
+      const { ws, welcome } = await connectDaemon(announcing, daemon);
+      expect(welcome.brokerPubkey).toBe("TEST-BROKER-PUBKEY");
+      ws.terminate();
+    } finally {
+      await announcing.close();
+    }
+  });
+
+  it("invalid JSON before registration → error + close", async () => {
+    const daemon = await testDaemon(fixture);
+    const ws = new WebSocket(fixture.url, { agent: daemon.agent });
+
+    const errorMessage = await new Promise<string>((resolve, reject) => {
+      ws.on("open", () => {
+        ws.send("not json");
+      });
+      ws.on("message", (data: Buffer | string) => {
+        const e = parseError(data);
+        if (e !== null) resolve(e.message);
+      });
+      ws.on("error", reject);
+    });
+    expect(errorMessage).toContain("invalid JSON");
+    await waitForClose(ws);
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(false);
+  });
+
+  it("post-registration non-response frames are silently dropped — connection stays live", async () => {
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
+
+    ws.on("message", (data: Buffer | string) => {
+      const req = parseRequest(data);
+      if (req === null) return;
+      ws.send(responseEnvelope({ id: req.id, status: 200, body: "" }));
     });
 
-    expect(response.type).toBe("welcome");
-    expect(response.url).toBe(`wss://relay.dicode.app/u/${identity.uuid}/hooks/`);
-    expect(server.hasClient(identity.uuid)).toBe(true);
+    // Neither a garbage envelope nor a second hello may tear the
+    // registration down after the daemon is registered.
+    ws.send(JSON.stringify({ nonsense: { foo: "bar" } }));
+    ws.send(JSON.stringify({ hello: { decrypt_pubkey: daemon.identity.decryptPubkeyB64 } }));
 
-    ws.close();
-    await waitForClose(ws);
-  });
+    // The connection must still serve a full forward round-trip.
+    const result = await fixture.relay.forward(
+      daemon.identity.uuid,
+      "GET",
+      "/hooks/ping",
+      {},
+      Buffer.alloc(0),
+    );
+    expect(result.status).toBe(200);
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(true);
 
-  it("wrong pubkey: uuid does not match sha256(pubkey) → error + close", async () => {
-    const identity = generateSigningIdentity();
-    const { ws, nonce } = await connectAndGetChallenge(port);
-
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payload = buildHelloPayload(nonce, timestamp);
-    const sig = identity.sign(payload);
-
-    // Use wrong UUID (all zeros)
-    const response = await sendHelloAndWait(ws, {
-      uuid: "0".repeat(64),
-      pubkey: identity.pubkeyBase64,
-      decrypt_pubkey: identity.decryptPubkeyBase64,
-      sig,
-      timestamp,
-    });
-
-    expect(response.type).toBe("error");
-    await waitForClose(ws);
-  });
-
-  it("stale timestamp (>30 s old) → error + close", async () => {
-    const identity = generateSigningIdentity();
-    const { ws, nonce } = await connectAndGetChallenge(port);
-
-    const timestamp = Math.floor(Date.now() / 1000) - 60; // 60 seconds ago
-    const payload = buildHelloPayload(nonce, timestamp);
-    const sig = identity.sign(payload);
-
-    const response = await sendHelloAndWait(ws, {
-      uuid: identity.uuid,
-      pubkey: identity.pubkeyBase64,
-      decrypt_pubkey: identity.decryptPubkeyBase64,
-      sig,
-      timestamp,
-    });
-
-    expect(response.type).toBe("error");
-    await waitForClose(ws);
-  });
-
-  it("replayed nonce: NonceStore rejects duplicate nonces", () => {
-    const store = new NonceStore(testNonceTtlMs);
-    const nonce = randomBytes(32).toString("hex");
-
-    // First check: not seen yet → registers and returns false
-    expect(store.check(nonce)).toBe(false);
-    // Second check: already seen → returns true
-    expect(store.check(nonce)).toBe(true);
-
-    store.clear();
+    ws.terminate();
   });
 
   it("connection cleanup: client disconnects → registry entry removed", async () => {
-    const identity = generateSigningIdentity();
-    const { ws, nonce } = await connectAndGetChallenge(port);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(true);
 
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payload = buildHelloPayload(nonce, timestamp);
-    const sig = identity.sign(payload);
-
-    await sendHelloAndWait(ws, {
-      uuid: identity.uuid,
-      pubkey: identity.pubkeyBase64,
-      decrypt_pubkey: identity.decryptPubkeyBase64,
-      sig,
-      timestamp,
+    const disconnected = new Promise<void>((resolve) => {
+      fixture.relay.once("client:disconnected", () => {
+        resolve();
+      });
     });
-
-    expect(server.hasClient(identity.uuid)).toBe(true);
-
     ws.close();
-    await waitForClose(ws);
+    await disconnected;
 
-    // Give the server a tick to process the close event
-    await new Promise((r) => setTimeout(r, 50));
-    expect(server.hasClient(identity.uuid)).toBe(false);
-  });
-
-  it("invalid JSON → connection closed", async () => {
-    const { ws } = await connectAndGetChallenge(port);
-
-    const closed = waitForClose(ws);
-    ws.send("not json");
-    await closed;
-  });
-
-  it("invalid pubkey length → error + close", async () => {
-    const identity = generateSigningIdentity();
-    const { ws, nonce } = await connectAndGetChallenge(port);
-
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payload = buildHelloPayload(nonce, timestamp);
-    const sig = identity.sign(payload);
-
-    // Send only 32 bytes of pubkey
-    const shortPubkey = randomBytes(32).toString("base64");
-    const response = await sendHelloAndWait(ws, {
-      uuid: identity.uuid,
-      pubkey: shortPubkey,
-      sig,
-      timestamp,
-    });
-
-    expect(response.type).toBe("error");
-    await waitForClose(ws);
-  });
-
-  it("bad signature → error + close", async () => {
-    const identity = generateSigningIdentity();
-    const { ws } = await connectAndGetChallenge(port);
-
-    const timestamp = Math.floor(Date.now() / 1000);
-    // Sign with wrong message to produce wrong signature
-    const wrongPayload = randomBytes(32);
-    const sig = identity.sign(wrongPayload);
-
-    const response = await sendHelloAndWait(ws, {
-      uuid: identity.uuid,
-      pubkey: identity.pubkeyBase64,
-      decrypt_pubkey: identity.decryptPubkeyBase64,
-      sig,
-      timestamp,
-    });
-
-    expect(response.type).toBe("error");
-    await waitForClose(ws);
-  });
-});
-
-describe("NonceStore", () => {
-  it("check returns false first time, true second time for same nonce", () => {
-    const store = new NonceStore(testNonceTtlMs);
-    const nonce = randomBytes(32).toString("hex");
-
-    expect(store.check(nonce)).toBe(false);
-    expect(store.check(nonce)).toBe(true);
-    expect(store.size).toBe(1);
-  });
-
-  it("different nonces are tracked independently", () => {
-    const store = new NonceStore(testNonceTtlMs);
-    const n1 = randomBytes(32).toString("hex");
-    const n2 = randomBytes(32).toString("hex");
-
-    expect(store.check(n1)).toBe(false);
-    expect(store.check(n2)).toBe(false);
-    expect(store.check(n1)).toBe(true);
-    expect(store.check(n2)).toBe(true);
-    expect(store.size).toBe(2);
-
-    store.clear();
-    expect(store.size).toBe(0);
-  });
-
-  it("nonce expires after TTL (60 s)", () => {
-    vi.useFakeTimers();
-    try {
-      const store = new NonceStore(testNonceTtlMs);
-      const nonce = randomBytes(32).toString("hex");
-
-      expect(store.check(nonce)).toBe(false);
-      expect(store.check(nonce)).toBe(true);
-
-      // Advance past 60 s TTL
-      vi.advanceTimersByTime(61_000);
-
-      // Nonce should have been evicted by the timer callback
-      expect(store.size).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  // Pins the memory ceiling promised by NonceStore's docstring. Without this
-  // a future bump of the underlying LRUCache config that drops `max` would
-  // silently regress the unbounded-memory protection that was the whole
-  // point of switching from Map+setTimeout.
-  it("size never exceeds the configured max — LRU evicts oldest", () => {
-    // Long TTL so eviction is purely LRU, not TTL — we're testing the
-    // ceiling behavior in isolation.
-    const store = new NonceStore(60 * 60 * 1000);
-    const N = 100_010; // 10 over the documented 100k ceiling
-    const firstNonce = "00".repeat(32);
-    expect(store.check(firstNonce)).toBe(false);
-    for (let i = 1; i < N; i++) {
-      // Synthetic but unique 64-hex nonces; we only need `i` to be unique.
-      const n = i.toString(16).padStart(64, "0");
-      store.check(n);
-    }
-    expect(store.size).toBeLessThanOrEqual(100_000);
-    // The very first nonce must have been LRU-evicted; check() returning
-    // false again proves it is no longer tracked. (Side-effect: this
-    // re-inserts it, but the assertion has already happened.)
-    expect(store.check(firstNonce)).toBe(false);
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(false);
   });
 });

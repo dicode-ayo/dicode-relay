@@ -10,11 +10,11 @@ A production-ready TypeScript/Node.js service that combines an OAuth broker and 
 ┌──────────────────────────────────────────────────────────────┐
 │  User's machine                                              │
 │                                                              │
-│  ┌──────────────────┐   WSS (persistent)                    │
+│  ┌──────────────────┐   WSS over mTLS (persistent)          │
 │  │  dicode daemon   │◄──────────────────────────────────┐   │
 │  │                  │                                   │   │
-│  │  relay.Client    │   /hooks/oauth-complete delivery  │   │
-│  │  (Go, PR #79)    │◄── forwarded over WS ─────────────┤   │
+│  │  relay client    │   /hooks/oauth-complete delivery  │   │
+│  │  (Deno task)     │◄── forwarded over WS ─────────────┤   │
 │  │                  │                                   │   │
 │  │  OAuth task.ts   │                                   │   │
 │  └────────┬─────────┘                                   │   │
@@ -26,7 +26,7 @@ A production-ready TypeScript/Node.js service that combines an OAuth broker and 
    │  Browser                         │   │                              │
    │                                  │   │  ┌────────────────────────┐  │
    │  GET /auth/github                │──►│  │  Relay Server (ws)     │  │
-   │    ?session=...                  │   │  │  - challenge/response  │  │
+   │    ?session=...                  │   │  │  - mTLS client certs   │  │
    │    &relay_uuid=...               │   │  │  - client registry     │  │
    │    &sig=...                      │   │  │  - request forwarding  │  │
    │                                  │   │  └────────────────────────┘  │
@@ -39,7 +39,7 @@ A production-ready TypeScript/Node.js service that combines an OAuth broker and 
                                           │  │  - delivers via relay  │  │
                ┌──────────────────────┐  │  └────────────────────────┘  │
                │  GitHub / Slack / …  │◄─┤                              │
-               │  (provider OAuth)    │  │  PORT 443 (WSS + HTTPS)      │
+               │  (provider OAuth)    │  │  public HTTPS + mTLS WSS     │
                └──────────────────────┘  └──────────────────────────────┘
 ```
 
@@ -75,7 +75,7 @@ npm run dev
 
 ```sh
 docker pull dicodeayo/dicode-relay
-docker run -p 5553:5553 --env-file .env dicodeayo/dicode-relay
+docker run -p 5553:5553 -p 5554:5554 --env-file .env dicodeayo/dicode-relay
 ```
 
 Also mirrored at `ghcr.io/dicode-ayo/dicode-relay` if you prefer to pull from GitHub's registry.
@@ -86,10 +86,12 @@ Also mirrored at `ghcr.io/dicode-ayo/dicode-relay` if you prefer to pull from Gi
 
 | Variable | Required | Description |
 |---|---|---|
-| `PORT` | No | Port to listen on (default: `5553`) |
+| `PORT` | No | Public listener port (default: `5553`) |
 | `BASE_URL` | Yes | Public base URL, e.g. `https://relay.dicode.app` — used in relay welcome messages |
-| `TLS_CERT_FILE` | No | Path to PEM TLS certificate (skip if TLS terminated externally) |
+| `TLS_CERT_FILE` | No | Path to PEM TLS certificate for the public listener (skip if TLS terminated externally) |
 | `TLS_KEY_FILE` | No | Path to PEM TLS private key |
+| `MTLS_CERT_FILE` | No | Server cert for the mTLS control channel (falls back to `TLS_*`, then a self-signed dev cert) |
+| `MTLS_KEY_FILE` | No | Private key for the mTLS control channel |
 | `GITHUB_CLIENT_ID` | Per-provider | GitHub OAuth app client ID |
 | `GITHUB_CLIENT_SECRET` | Per-provider | GitHub OAuth app client secret |
 | `SLACK_CLIENT_ID` | Per-provider | Slack OAuth app client ID (PKCE-only, no secret) |
@@ -117,58 +119,62 @@ See `.env.example` for registration links per provider.
 
 ---
 
-## Relay protocol reference
+## Relay protocol reference (v4)
 
-All WebSocket messages are JSON text frames.
+All WebSocket messages are JSON text frames shaped as single-key oneof
+envelopes (`{"hello": {...}}`), generated from `proto/relay.proto`.
 
 ### Handshake
 
-```
-Server → Client:
-  { "type": "challenge", "nonce": "<64 lowercase hex chars>" }
+The daemon dials the broker's **mTLS port** presenting a self-signed TLS
+client certificate that wraps its ECDSA P-256 identity key. The broker
+derives the daemon's identity from the peer certificate:
+`uuid = hex(sha256(uncompressed_cert_pubkey))`. TLS 1.3 CertificateVerify
+channel-binds the key — there is no application-level challenge.
 
-Client → Server:
-  {
-    "type":           "hello",
-    "uuid":           "<64 lowercase hex>",   // hex(sha256(uncompressed_pubkey))
-    "pubkey":         "<base64 std>",         // 65 bytes: 0x04 || X || Y — ECDSA signing key
-    "decrypt_pubkey": "<base64 std>",         // 65 bytes: 0x04 || X || Y — ECIES recipient (OAuth token delivery)
-    "sig":            "<base64 std>",         // ECDSA P-256 ASN.1 DER over sha256(nonce_bytes || timestamp_be_uint64)
-    "timestamp":      <unix seconds integer>
-  }
+```
+Client → Server (immediately after the WS opens):
+  { "hello": { "decrypt_pubkey": "<base64 std>" } }   // 65 bytes: 0x04 || X || Y — ECIES recipient
 
 Server → Client (success):
   {
-    "type":          "welcome",
-    "url":           "wss://relay.dicode.app/u/<uuid>/hooks/",
-    "protocol":      2,                        // broker advertises split sign/decrypt key support
-    "broker_pubkey": "<base64 SPKI DER>"       // broker's delivery-signing key; daemons pin on first connect (TOFU)
+    "welcome": {
+      "url":           "wss://relay.dicode.app/u/<uuid>/hooks/",
+      "protocol":      4,
+      "broker_pubkey": "<base64 SPKI DER>"   // broker's delivery-signing key; persisted by the
+                                             // daemon on every connect (channel is TLS-authenticated)
+    }
   }
 
 Server → Client (failure):
-  { "type": "error", "message": "<reason>" }
+  { "error": { "message": "<reason>" } }
 ```
+
+WS close codes: `4400` bad hello, `4401` no client certificate presented,
+`4402` client certificate key is not P-256. Both sides reject protocol < 4.
 
 ### Webhook forwarding
 
 ```
 Server → Client (inbound request):
   {
-    "type":    "request",
-    "id":      "<uuidv4>",
-    "method":  "POST",
-    "path":    "/hooks/some-task",
-    "headers": { "Content-Type": ["application/json"] },
-    "body":    "<base64 encoded bytes>"
+    "request": {
+      "id":      "<uuidv4>",
+      "method":  "POST",
+      "path":    "/hooks/some-task",
+      "headers": { "Content-Type": { "values": ["application/json"] } },
+      "body":    "<base64 encoded bytes>"
+    }
   }
 
 Client → Server (response):
   {
-    "type":    "response",
-    "id":      "<same uuidv4>",
-    "status":  200,
-    "headers": { "Content-Type": ["application/json"] },
-    "body":    "<base64 encoded bytes>"
+    "response": {
+      "id":      "<same uuidv4>",
+      "status":  200,
+      "headers": { "Content-Type": { "values": ["application/json"] } },
+      "body":    "<base64 encoded bytes>"
+    }
   }
 ```
 
@@ -178,12 +184,13 @@ When the broker completes a code exchange, it sends a `request` message to the d
 
 ```json
 {
-  "type":    "request",
-  "id":      "<uuidv4>",
-  "method":  "POST",
-  "path":    "/hooks/oauth-complete",
-  "headers": { "Content-Type": ["application/json"] },
-  "body":    "<base64 of OAuthTokenDeliveryPayload JSON>"
+  "request": {
+    "id":      "<uuidv4>",
+    "method":  "POST",
+    "path":    "/hooks/oauth-complete",
+    "headers": { "Content-Type": { "values": ["application/json"] } },
+    "body":    "<base64 of OAuthTokenDeliveryPayload JSON>"
+  }
 }
 ```
 
@@ -205,11 +212,13 @@ See [docs/providers.md](docs/providers.md) for the full ECIES decryption procedu
 
 ## Security model
 
-- **ECDSA authentication**: Every broker auth request is signed by the daemon's P-256 identity key. The broker verifies the signature against the public key registered in the relay client registry — no API key or shared secret required.
+- **mTLS channel binding**: The daemon's identity is its TLS client certificate (a self-signed wrapper around its P-256 key). TLS 1.3 CertificateVerify covers the handshake transcript, so a signature can never be relayed to a different broker — the signature-relay/UUID-hijack class of attack against app-level challenge handshakes is structurally impossible.
+- **Server authentication**: Daemons verify the broker's server certificate via normal TLS (WebPKI for the hosted relay, an explicit CA file for self-hosted brokers). The broker's delivery-signing pubkey arrives over this authenticated channel — no trust-on-first-use pinning.
+- **ECDSA authentication (OAuth)**: Every broker auth request is signed by the daemon's P-256 identity key over a domain-labeled, length-prefixed preimage. The broker verifies against the public key extracted from the daemon's client certificate — no API key or shared secret required.
 - **ECIES token encryption**: Tokens are encrypted with the daemon's `decrypt_pubkey` (the ECIES-only half of the split sign/decrypt identity, sent on `hello`) before entering the relay code path. The relay server never sees plaintext tokens.
 - **PKCE binding**: The PKCE challenge is signed into the broker request and bound to the session. The verifier stays on the daemon and is never transmitted.
 - **Single-use sessions**: Sessions are deleted immediately after the token is delivered. Replay attacks require re-running the full OAuth flow.
-- **Timestamp + nonce replay prevention**: Auth requests must be within ±30 s of server time. Relay handshake nonces are tracked for 60 s.
+- **Timestamp freshness**: OAuth auth requests must be within ±30 s of server time.
 
 See the OAuth broker design document in the dicode-core repository for the full threat model.
 
@@ -222,6 +231,7 @@ See the OAuth broker design document in the dicode-core repository for the full 
 ```sh
 docker run -d \
   -p 5553:5553 \
+  -p 5554:5554 \
   -e BASE_URL=https://relay.dicode.app \
   -e GITHUB_CLIENT_ID=xxx \
   -e GITHUB_CLIENT_SECRET=yyy \
@@ -232,9 +242,16 @@ Also available at `ghcr.io/dicode-ayo/dicode-relay` if you prefer GitHub's regis
 
 ### Cloudflare
 
-Point a Cloudflare-proxied A record at your server. Enable "WebSocket" under
-the Cloudflare Network settings for the domain. Cloudflare terminates TLS;
-the service listens on plain HTTP (omit `TLS_CERT_FILE`/`TLS_KEY_FILE`).
+Point a Cloudflare-proxied A record at your server **for the public listener
+only**. Enable "WebSocket" under the Cloudflare Network settings for the
+domain. Cloudflare terminates TLS; the public listener can run plain HTTP
+(omit `TLS_CERT_FILE`/`TLS_KEY_FILE`).
+
+**The mTLS port must NOT go through the Cloudflare proxy** (or any
+TLS-terminating proxy): termination strips the daemon's client certificate
+and every connection is rejected with close code 4401. Expose
+`server.mtls.port` directly (grey-cloud DNS record) or behind an L4/TCP load
+balancer with TLS passthrough.
 
 Enable **Session Affinity** in the Cloudflare load balancer if you run multiple
 instances — sessions are stored in-process.
@@ -242,6 +259,7 @@ instances — sessions are stored in-process.
 ### Self-host (nginx)
 
 ```nginx
+# Public listener — TLS termination is fine here.
 server {
     listen 443 ssl;
     server_name relay.dicode.app;
@@ -252,6 +270,16 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+    }
+}
+
+# mTLS control channel — TCP passthrough ONLY (stream module), never
+# `listen ... ssl`: nginx must not terminate this TLS session or the
+# daemon's client certificate is lost.
+stream {
+    server {
+        listen 5554;
+        proxy_pass 127.0.0.1:5554;
     }
 }
 ```
@@ -281,20 +309,23 @@ const identity = stored
       return id;
     })();
 
-const tofuCheckAndPin = async (brokerPubkeyB64: string) => {
-  const pinned = await myKv.get<string>("broker_pubkey");
-  if (pinned === null) {
-    await myKv.set("broker_pubkey", brokerPubkeyB64);
-    return "new" as const;
-  }
-  return pinned === brokerPubkeyB64 ? "match" as const : "mismatch" as const;
-};
+// The client certificate wraps the identity's sign key — regenerated per
+// boot, never persisted (only the public key matters to the broker).
+const clientCert = await identity.mintClientCert();
 
 const client = new RelayClient({
-  serverURL: "wss://relay.example/",
+  serverURL: "wss://relay.example:5554/",   // the broker's mTLS port
   localPort: 8080,
   identity,
-  tofuCheckAndPin,
+  tls: {
+    certPem: clientCert.certPem,
+    keyPem: clientCert.keyPem,
+    // ca: selfSignedBrokerCertPem,  // only for self-hosted brokers; omit for WebPKI
+  },
+  onBrokerPubkey: async (b64) => {
+    // Persist unconditionally — the channel is TLS-server-authenticated.
+    await myKv.set("broker_pubkey", b64);
+  },
   log: console,
   onStatus: (s) => console.log("status:", s),
 });
@@ -305,7 +336,7 @@ await client.run();
 The client targets Node.js 22+ and Deno (both expose `node:crypto`). It is not
 browser-compatible — `node:crypto` primitives are used for HKDF, AES-GCM decrypt,
 and broker signature verification. In dicode tasks, use `dicode.kv` from the
-SDK to persist the `StoredIdentity` blob and the pinned broker pubkey.
+SDK to persist the `StoredIdentity` blob and the broker pubkey.
 
 ---
 

@@ -7,11 +7,29 @@
 # Config path: relay.yaml (default), --config <path>, or RELAY_CONFIG env.
 
 server:
+  # Public listener: webhooks (/u/<uuid>/hooks/*), OAuth routes, /status.
+  # Plain HTTP or one-cert TLS — fine behind a TLS-terminating proxy
+  # (Cloudflare, nginx).
   port: 5553
   base_url: http://localhost:5553
   tls:
     cert_file: ""          # e.g. ${TLS_CERT_FILE}
     key_file: ""           # e.g. ${TLS_KEY_FILE}
+
+  # mTLS control channel: the port daemons dial (wss://). Always TLS with
+  # client certificates requested — the peer certificate carries the daemon
+  # identity. This port needs END-TO-END TLS passthrough: expose it directly
+  # or via an L4 (TCP) load balancer only. A TLS-terminating proxy in front
+  # of it (Cloudflare orange-cloud, nginx TLS termination) strips the client
+  # certificate and breaks every daemon connection.
+  #
+  # cert_file/key_file empty → falls back to server.tls.*; if that is also
+  # empty, a self-signed dev cert is auto-generated at cwd/relay-mtls-cert.pem
+  # (point daemons' relay.ca_file at it).
+  mtls:
+    port: 5554
+    cert_file: ""          # e.g. ${MTLS_CERT_FILE}
+    key_file: ""           # e.g. ${MTLS_KEY_FILE}
 
 # status:
 #   # Uncomment and set STATUS_PASSWORD in the environment to enable the
@@ -23,11 +41,11 @@ server:
 #   password: ${STATUS_PASSWORD}
 
 relay:
+  # Clock-skew tolerance for OAuth /auth request freshness.
   timestamp_tolerance_s: 30
   ping_interval_ms: 30000
   pong_timeout_ms: 10000
   request_timeout_ms: 30000
-  nonce_ttl_ms: 60000
 
 broker:
   session_ttl_ms: 300000
@@ -37,8 +55,9 @@ broker:
   # Use a literal path — do NOT use `${ENV_VAR}` interpolation here. If
   # the env var is unset, interpolation silently collapses to "", skips
   # this field, and auto-generates a fresh key on every start, rotating
-  # the broker's public key and breaking every daemon that has TOFU-pinned
-  # it. Either write the absolute path literally, or set the env var.
+  # the broker's public key and invalidating delivery signatures for
+  # daemons that have not reconnected since. Either write the absolute
+  # path literally, or set the env var.
   signing_key_file: ""     # empty → auto-generate at cwd/broker-signing-key.pem
 
   # OAuth providers — add your own or override defaults.

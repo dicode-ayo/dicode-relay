@@ -1,13 +1,23 @@
+import { Agent as HttpsAgent } from "node:https";
 import WebSocket from "ws";
 import { create, fromJson, toJson, type JsonValue } from "@bufbuild/protobuf";
 import { ClientMessageSchema, ServerMessageSchema } from "../relay/pb/relay_pb.js";
 import type { Identity } from "./identity.js";
-import { runHandshake, type SocketLike, type TofuResult } from "./handshake.js";
+import { runHandshake, type SocketLike } from "./handshake.js";
 import { dispatchRequest } from "./forwarder.js";
 import { newBackoff } from "./backoff.js";
 
 const STABLE_MS = 10_000;
 const DIAL_TIMEOUT_MS = 15_000;
+const HANDSHAKE_TIMEOUT_MS = 15_000;
+
+/** WS close codes the broker uses for mTLS admission failures
+ *  (mirrors CLOSE_* in relay/server.ts). */
+const MTLS_CLOSE_MESSAGES: Record<number, string> = {
+  4400: "broker rejected our hello frame",
+  4401: "broker did not receive our TLS client certificate — check that the tls option carries the identity cert/key and that no TLS-terminating proxy sits in front of the mTLS port",
+  4402: "broker rejected our TLS client certificate: key is not P-256",
+};
 
 export interface RelayClientLogger {
   info: (msg: string, meta?: Record<string, unknown>) => void;
@@ -24,27 +34,43 @@ export interface RelayStatus {
   last_connected_at?: number; // unix seconds
 }
 
+export interface RelayClientTls {
+  /** PEM client certificate wrapping the identity's P-256 sign key
+   *  (see Identity.mintClientCert). */
+  certPem: string;
+  /** PEM PKCS8 private key matching certPem. */
+  keyPem: string;
+  /**
+   * PEM CA certificate(s) to verify the broker's server cert against.
+   * Omit to use the platform trust store (WebPKI) — the right choice for the
+   * hosted relay. Set for self-hosted brokers with self-signed certs.
+   */
+  ca?: string | string[];
+}
+
 export interface RelayClientOptions {
   serverURL: string;
   localPort: number;
   identity: Identity;
+  /** TLS client-certificate material. The connection is always wss://. */
+  tls: RelayClientTls;
   /**
-   * Trust-on-first-use callback. Receives the broker's announced pubkey;
-   * the consumer compares against its persisted record and returns:
-   *   - "new"      — the consumer MUST persist the key before returning,
-   *                  otherwise TOFU is defeated (every connect would be
-   *                  treated as first-seen, accepting any key).
-   *   - "match"    — the announced key matches what the consumer pinned;
-   *                  the handshake continues normally.
-   *   - "mismatch" — the announced key differs from the pinned record;
-   *                  RelayClient rejects the handshake.
+   * Called after each successful handshake with the broker's announced
+   * delivery-signing pubkey (when present). The channel is
+   * TLS-server-authenticated, so the consumer should persist the key
+   * unconditionally (it verifies OAuth delivery envelopes out-of-band).
+   * Awaited before the connection is reported as connected.
    */
-  tofuCheckAndPin: (brokerPubkeyB64: string) => Promise<TofuResult>;
+  onBrokerPubkey?: (brokerPubkeyB64: string) => Promise<void>;
   log: RelayClientLogger;
   /** Called whenever connection state changes. Use for status reporting. */
   onStatus?: (s: RelayStatus) => void;
   /** Dial timeout in ms before a not-yet-open socket is abandoned. Default 15s. */
   dialTimeoutMs?: number;
+  /** Timeout in ms for the app-level handshake (hello → welcome) after the
+   *  socket opens. Guards against a broker that accepts the connection but
+   *  never answers. Default 15s. */
+  handshakeTimeoutMs?: number;
 }
 
 /**
@@ -113,7 +139,18 @@ export class RelayClient {
     // abortHandshake() on an already-nulled request (TypeError: reading
     // 'setHeader' of null) and tears a healthy connection down ~DIAL_TIMEOUT_MS
     // after connecting, causing a permanent reconnect flap.
-    const ws = new WebSocket(this.opts.serverURL);
+    //
+    // The TLS options MUST ride on an https.Agent: Deno's node:https drops
+    // per-request TLS options ({cert,key,ca} directly in the ws options
+    // object) and ignores createConnection. Agent-carried options work on
+    // both Deno and Node (see spikes/README.md).
+    const { tls } = this.opts;
+    const agent = new HttpsAgent({
+      cert: tls.certPem,
+      key: tls.keyPem,
+      ...(tls.ca !== undefined ? { ca: tls.ca } : {}),
+    });
+    const ws = new WebSocket(this.opts.serverURL, { agent });
 
     // Register the message adapter BEFORE awaiting "open". The relay server sends
     // a challenge frame immediately upon connection. If we registered the listener
@@ -168,12 +205,48 @@ export class RelayClient {
       ws.once("close", onClose);
     });
 
+    // Map broker mTLS admission close codes to actionable errors. These are
+    // persistent failures (bad cert plumbing, terminating proxy in the way) —
+    // the loud message matters more than the retry, which will keep failing.
+    const onAdmissionClose = (code: number): void => {
+      const msg = MTLS_CLOSE_MESSAGES[code];
+      if (msg !== undefined) {
+        this.opts.log.error(`relay: ${msg}`, { closeCode: code });
+      }
+    };
+    ws.on("close", onAdmissionClose);
+
     try {
-      const hr = await runHandshake(sock, this.opts.identity, this.opts.tofuCheckAndPin);
+      // Deadline for the app-level handshake: a broker that accepts the WS
+      // but never sends welcome must not hang runOnce forever. adaptWs
+      // rejects pending recv() calls on socket error/close, and this timer
+      // covers the silent-but-healthy-socket case.
+      let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+      const hr = await Promise.race([
+        runHandshake(sock, this.opts.identity),
+        new Promise<never>((_, reject) => {
+          handshakeTimer = setTimeout(() => {
+            reject(new Error("handshake timeout"));
+          }, this.opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS);
+        }),
+      ]).finally(() => {
+        clearTimeout(handshakeTimer);
+      });
+
+      // Await the consumer's broker-key persistence while the handshake
+      // adapter's listener is still attached and buffering: any frame the
+      // broker forwards during this await lands in the adapter inbox and is
+      // replayed below. Awaiting after detach() would open a listener-less
+      // window in which forwarded requests are silently dropped.
+      if (hr.brokerPubkey !== "") {
+        await this.opts.onBrokerPubkey?.(hr.brokerPubkey);
+      }
+
       // Detach the handshake message listener and collect any frames that
-      // arrived in the microtask gap between the welcome frame and detach().
-      // The broker may pipeline welcome + a request back-to-back; without
-      // replay those frames would be silently lost.
+      // arrived since the welcome frame. The broker may pipeline welcome +
+      // a request back-to-back; without replay those frames would be lost.
+      // No awaits between here and serve() — the detach→serve transition
+      // must stay synchronous so no listener-less gap exists.
       const leftover = detach();
       if (leftover.length > 0) {
         this.opts.log.warn("relay: replayed buffered frames at handshake→serve", {
@@ -198,6 +271,7 @@ export class RelayClient {
 
       await this.serve(ws, signal);
     } finally {
+      ws.removeListener("close", onAdmissionClose);
       try {
         ws.terminate();
       } catch {
@@ -208,6 +282,13 @@ export class RelayClient {
 
   private serve(ws: WebSocket, signal?: AbortSignal): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      // The socket may have closed while runOnce was awaiting
+      // onBrokerPubkey — its 'close' already fired and will not fire again
+      // for the listener attached below.
+      if (ws.readyState === WebSocket.CLOSED) {
+        resolve();
+        return;
+      }
       const onAbort = (): void => {
         ws.terminate();
       };
@@ -269,16 +350,34 @@ export class RelayClient {
 /** Adapt the `ws` WebSocket to the SocketLike interface used by runHandshake. */
 function adaptWs(ws: WebSocket): { sock: SocketLike; detach: () => string[] } {
   const inbox: string[] = [];
-  const waiters: ((s: string) => void)[] = [];
+  const waiters: { resolve: (s: string) => void; reject: (err: Error) => void }[] = [];
+  let failure: Error | null = null;
 
   const onMessage = (data: Buffer | string): void => {
     const raw = typeof data === "string" ? data : data.toString("utf8");
     const next = waiters.shift();
-    if (next) next(raw);
+    if (next) next.resolve(raw);
     else inbox.push(raw);
+  };
+  // A socket error or close during the handshake must reject pending (and
+  // future) recv() calls — otherwise runOnce would await recv() forever and
+  // the reconnect loop would never fire. The error listener also keeps the
+  // ws EventEmitter from throwing on an unhandled 'error' in the window
+  // between the dial promise settling and serve() attaching its listeners.
+  const fail = (err: Error): void => {
+    failure ??= err;
+    for (const w of waiters.splice(0)) w.reject(err);
+  };
+  const onError = (err: Error): void => {
+    fail(err);
+  };
+  const onClose = (code: number): void => {
+    fail(new Error(`socket closed during handshake (code ${String(code)})`));
   };
 
   ws.on("message", onMessage);
+  ws.on("error", onError);
+  ws.on("close", onClose);
 
   return {
     sock: {
@@ -286,18 +385,26 @@ function adaptWs(ws: WebSocket): { sock: SocketLike; detach: () => string[] } {
         ws.send(s);
       },
       recv: () =>
-        new Promise<string>((r) => {
+        new Promise<string>((resolve, reject) => {
+          if (failure !== null) {
+            reject(failure);
+            return;
+          }
           const queued = inbox.shift();
-          if (queued !== undefined) r(queued);
-          else waiters.push(r);
+          if (queued !== undefined) resolve(queued);
+          else waiters.push({ resolve, reject });
         }),
     },
     detach: (): string[] => {
-      // Remove the handshake listener so it no longer buffers incoming frames.
-      // Return any frames that arrived after the final handshake message — they
-      // are pre-serve request frames that must be replayed into handleFrame so
-      // they are not silently lost during the handshake→serve transition gap.
+      // Remove the handshake listeners so they no longer buffer incoming
+      // frames or intercept lifecycle events (serve() owns those next).
+      // Return any frames that arrived after the final handshake message —
+      // they are pre-serve request frames that must be replayed into
+      // handleFrame so they are not silently lost during the
+      // handshake→serve transition gap.
       ws.removeListener("message", onMessage);
+      ws.removeListener("error", onError);
+      ws.removeListener("close", onClose);
       return inbox.splice(0);
     },
   };

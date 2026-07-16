@@ -19,5 +19,5 @@ USER dicode
 # isE2EMockEnabled() also honors as a hard refusal.
 ENV DICODE_E2E_MOCK_PROVIDER=""
 ENV NODE_ENV="production"
-EXPOSE 5553
+EXPOSE 5553 5554
 CMD ["node", "dist/index.js"]

@@ -6,22 +6,27 @@
  * what `@bufbuild/protobuf`'s fromJson/toJson produces for the generated
  * ServerMessage and ClientMessage oneof envelopes.
  *
+ * The listener is mTLS: daemons authenticate with a self-signed TLS client
+ * certificate wrapping their P-256 signing key. The certificate chain is not
+ * CA-verified (`rejectUnauthorized: false`) — identity is the key itself,
+ * uuid = hex(sha256(uncompressed_cert_pubkey)). TLS 1.3 CertificateVerify
+ * channel-binds the key, so no application-level challenge is needed.
+ *
  * Responsibilities:
- *  - Challenge/response handshake with ECDSA P-256 signature verification
+ *  - Peer-certificate identity extraction + slim hello (ECIES recipient key)
  *  - Connected-client registry (uuid → WebSocket + public key)
  *  - HTTP request forwarding to daemon over the established WebSocket
  *  - Ping/pong keepalive (30 s interval, 10 s timeout)
  */
 
-import { createHash, createPublicKey, createVerify } from "node:crypto";
-import { randomBytes } from "node:crypto";
+import { createPublicKey } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage } from "node:http";
-import { type Server } from "node:http";
+import type { Server as HttpsServer } from "node:https";
+import type { TLSSocket } from "node:tls";
 import { create, fromJson, toJson, type JsonValue } from "@bufbuild/protobuf";
 import { WebSocket, WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
-import { NonceStore } from "./nonces.js";
 import {
   ClientMessageSchema,
   HeaderValuesSchema,
@@ -33,6 +38,7 @@ import {
   type ServerMessage,
 } from "./pb/relay_pb.js";
 import { uncompressedP256ToSpki } from "../shared/crypto.js";
+import { extractP256PointFromCert, uuidFromP256Point } from "../shared/certs.js";
 import type { ForwardResponse } from "../shared/protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -55,13 +61,17 @@ export class ForwardTimeoutError extends Error {
 
 /**
  * Broker protocol version advertised in the welcome message.
- * Version 3 means: generated-from-proto wire format.
- *   - headers: map<string, HeaderValues{values: repeated string}>
- *   - timestamp: int32 (so the JSON encoding is a number, not a quoted string)
- *   - envelope: {"<kind>": {...}} instead of flat {"type": "...", ...}
- * Daemons refuse connections when the broker advertises < 3.
+ * Version 4 means: mTLS control channel — daemon identity travels in the TLS
+ * client certificate; hello carries only the ECIES recipient key.
+ * Daemons refuse connections when the broker advertises < 4.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
+
+/** WS close codes for mTLS admission failures. 4409 is reserved for a
+ *  future tenancy admission gate. */
+export const CLOSE_BAD_HELLO = 4400;
+export const CLOSE_NO_CLIENT_CERT = 4401;
+export const CLOSE_CERT_NOT_P256 = 4402;
 
 // ---------------------------------------------------------------------------
 // Client registry entry
@@ -95,27 +105,26 @@ interface PendingRequest {
 export interface RelayServerOptions {
   /** Public base URL, e.g. "wss://relay.dicode.app" — used in welcome message */
   baseUrl: string;
-  /** HTTP(S) server to attach the WebSocket server to (optional) */
-  server?: Server;
-  /** Port to listen on when no server is provided */
-  port?: number;
+  /**
+   * The mTLS HTTPS server to attach the WebSocket server to. Must be created
+   * with `requestCert: true, rejectUnauthorized: false` — the peer certificate
+   * is the daemon's identity and connections without one are rejected at the
+   * WS layer with CLOSE_NO_CLIENT_CERT.
+   */
+  server: HttpsServer;
   /** All tuning values — sourced from the Zod config schema (config.ts) */
-  timestampToleranceS: number;
   pingIntervalMs: number;
   pongTimeoutMs: number;
   requestTimeoutMs: number;
-  nonceTtlMs: number;
   /** Base64-encoded SPKI DER public key for broker delivery signing. Announced in the welcome message. */
   brokerPubkey?: string;
 }
 
 export class RelayServer extends EventEmitter {
   private readonly wss: WebSocketServer;
-  private readonly nonces: NonceStore;
   private readonly clients = new Map<string, ConnectedClient>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly baseUrl: string;
-  private readonly timestampToleranceS: number;
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
   private readonly requestTimeoutMs: number;
@@ -124,24 +133,15 @@ export class RelayServer extends EventEmitter {
   constructor(opts: RelayServerOptions) {
     super();
     this.baseUrl = opts.baseUrl;
-    this.nonces = new NonceStore(opts.nonceTtlMs);
-    this.timestampToleranceS = opts.timestampToleranceS;
     this.pingIntervalMs = opts.pingIntervalMs;
     this.pongTimeoutMs = opts.pongTimeoutMs;
     this.requestTimeoutMs = opts.requestTimeoutMs;
     this.brokerPubkey = opts.brokerPubkey;
 
-    if (opts.server !== undefined) {
-      this.wss = new WebSocketServer({ server: opts.server });
-    } else if (opts.port !== undefined) {
-      this.wss = new WebSocketServer({ port: opts.port });
-    } else {
-      // Random available port (useful for tests)
-      this.wss = new WebSocketServer({ port: 0 });
-    }
+    this.wss = new WebSocketServer({ server: opts.server });
 
-    this.wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
-      this.handleConnection(ws);
+    this.wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+      this.handleConnection(ws, req);
     });
   }
 
@@ -225,7 +225,6 @@ export class RelayServer extends EventEmitter {
         client.ws.terminate();
       }
       this.clients.clear();
-      this.nonces.clear();
 
       this.wss.close((err) => {
         if (err !== undefined) {
@@ -241,13 +240,36 @@ export class RelayServer extends EventEmitter {
   // Connection lifecycle
   // ---------------------------------------------------------------------------
 
-  private handleConnection(ws: WebSocket): void {
-    // Send challenge immediately.
-    const nonce = randomBytes(32).toString("hex"); // 64 hex chars
-    const challengeEnvelope = create(ServerMessageSchema, {
-      kind: { case: "challenge", value: { nonce } },
+  private handleConnection(ws: WebSocket, req: IncomingMessage): void {
+    // A ws 'error' with no listener throws at the EventEmitter level and
+    // takes the whole broker down — and rejected connections (4401/4402)
+    // return before the lifecycle listeners below are attached, so a peer
+    // that aborts after rejection would otherwise crash the process. Attach
+    // the safety listener before anything can bail.
+    ws.on("error", () => {
+      ws.terminate();
     });
-    this.sendServerMessage(ws, challengeEnvelope);
+
+    // Identity comes from the TLS peer certificate; extract it before
+    // accepting any frames. getPeerX509Certificate() can be undefined when
+    // the socket presented no certificate.
+    const socket = req.socket as TLSSocket;
+    const peerCert =
+      typeof socket.getPeerX509Certificate === "function"
+        ? socket.getPeerX509Certificate()
+        : undefined;
+    if (peerCert === undefined) {
+      this.sendError(ws, "client certificate required");
+      ws.close(CLOSE_NO_CLIENT_CERT, "client certificate required");
+      return;
+    }
+    const certPoint = extractP256PointFromCert(peerCert);
+    if (certPoint === null) {
+      this.sendError(ws, "client certificate key must be P-256");
+      ws.close(CLOSE_CERT_NOT_P256, "client certificate key must be P-256");
+      return;
+    }
+    const uuid = uuidFromP256Point(certPoint);
 
     let registeredUuid: string | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -263,8 +285,14 @@ export class RelayServer extends EventEmitter {
         pongTimer = null;
       }
       if (registeredUuid !== null) {
-        this.emit("client:disconnected", registeredUuid);
-        this.clients.delete(registeredUuid);
+        // Only tear down the registry entry if it still belongs to THIS
+        // socket — a reconnect for the same uuid may have replaced it, and
+        // the old socket's close event must not delete the fresh entry.
+        const current = this.clients.get(registeredUuid);
+        if (current?.ws === ws) {
+          this.emit("client:disconnected", registeredUuid);
+          this.clients.delete(registeredUuid);
+        }
         registeredUuid = null;
       }
     };
@@ -299,40 +327,50 @@ export class RelayServer extends EventEmitter {
         // Expecting a hello message.
         if (envelope.kind.case !== "hello") {
           this.sendError(ws, "expected hello message");
-          ws.close();
+          ws.close(CLOSE_BAD_HELLO, "expected hello message");
           return;
         }
         const hello = envelope.kind.value;
-        const err = this.verifyHello(hello, nonce);
+        const err = validateDecryptPubkey(hello);
         if (err !== null) {
           this.sendError(ws, err);
-          ws.close();
+          ws.close(CLOSE_BAD_HELLO, err);
           return;
         }
 
-        const pubkeyBytes = Buffer.from(hello.pubkey, "base64");
         const decryptPubkeyBytes = Buffer.from(hello.decryptPubkey, "base64");
 
-        this.clients.set(hello.uuid, {
+        // A reconnect for the same uuid replaces the previous socket. Detach
+        // the old socket's registration first: its close event would
+        // otherwise fire later, run its cleanup(), and delete THIS fresh
+        // registration from the map.
+        const previous = this.clients.get(uuid);
+        if (previous !== undefined) {
+          this.clients.delete(uuid);
+          this.emit("client:disconnected", uuid);
+          previous.ws.terminate();
+        }
+
+        this.clients.set(uuid, {
           ws,
-          uuid: hello.uuid,
-          pubkey: pubkeyBytes,
+          uuid,
+          pubkey: certPoint,
           decryptPubkey: decryptPubkeyBytes,
         });
-        registeredUuid = hello.uuid;
+        registeredUuid = uuid;
 
         const welcomeEnvelope = create(ServerMessageSchema, {
           kind: {
             case: "welcome",
             value: {
-              url: `${this.baseUrl}/u/${hello.uuid}/hooks/`,
+              url: `${this.baseUrl}/u/${uuid}/hooks/`,
               protocol: PROTOCOL_VERSION,
               ...(this.brokerPubkey !== undefined ? { brokerPubkey: this.brokerPubkey } : {}),
             },
           },
         });
         this.sendServerMessage(ws, welcomeEnvelope);
-        this.emit("client:connected", hello.uuid);
+        this.emit("client:connected", uuid);
 
         // Start keepalive.
         pingTimer = setInterval(() => {
@@ -388,92 +426,6 @@ export class RelayServer extends EventEmitter {
   }
 
   // ---------------------------------------------------------------------------
-  // Handshake verification
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Verifies all fields of a hello message.
-   * Returns null on success, or an error string on failure.
-   */
-  private verifyHello(hello: Hello, nonce: string): string | null {
-    // Step 1: Decode pubkey — must be exactly 65 bytes starting with 0x04.
-    let pubkeyBytes: Buffer;
-    try {
-      pubkeyBytes = Buffer.from(hello.pubkey, "base64");
-    } catch {
-      return "invalid pubkey encoding";
-    }
-    if (pubkeyBytes.length !== 65 || pubkeyBytes[0] !== 0x04) {
-      return "pubkey must be 65 bytes starting with 0x04";
-    }
-
-    // Step 1b: Validate decrypt_pubkey structurally and as an on-curve P-256
-    // point. Required — every daemon advertises a split sign/decrypt identity.
-    // Parse failures reject the handshake.
-    if (hello.decryptPubkey === "") {
-      return "decrypt_pubkey is required";
-    }
-    let decryptBytes: Buffer;
-    try {
-      decryptBytes = Buffer.from(hello.decryptPubkey, "base64");
-    } catch {
-      return "invalid decrypt_pubkey encoding";
-    }
-    if (decryptBytes.length !== 65 || decryptBytes[0] !== 0x04) {
-      return "decrypt_pubkey must be 65 bytes starting with 0x04";
-    }
-    try {
-      const spkiDer = uncompressedP256ToSpki(decryptBytes);
-      createPublicKey({ key: spkiDer, format: "der", type: "spki" });
-    } catch {
-      return "decrypt_pubkey is not a valid P-256 point";
-    }
-
-    // Step 2: Verify uuid == hex(sha256(pubkey)).
-    const expectedUuid = createHash("sha256").update(pubkeyBytes).digest("hex");
-    if (expectedUuid !== hello.uuid) {
-      return "uuid does not match sha256(pubkey)";
-    }
-
-    // Step 3: Verify timestamp within ±timestampToleranceS.
-    const now = Math.floor(Date.now() / 1000);
-    if (Math.abs(now - hello.timestamp) > this.timestampToleranceS) {
-      return "timestamp out of range";
-    }
-
-    // Step 4: Verify nonce not seen in last nonceTtlMs.
-    if (this.nonces.check(nonce)) {
-      return "nonce replayed";
-    }
-
-    // Step 5: Verify ECDSA signature over sha256(nonce_bytes || timestamp_be_uint64).
-    // The Go client signs the raw sha256 digest with ecdsa.SignASN1 over an
-    // 8-byte big-endian timestamp — the wire int32 is widened back here so
-    // the preimage matches regardless of the smaller wire encoding.
-    const nonceBytes = Buffer.from(nonce, "hex");
-    const tsBytes = Buffer.allocUnsafe(8);
-    tsBytes.writeBigUInt64BE(BigInt(hello.timestamp));
-    const message = Buffer.concat([nonceBytes, tsBytes]);
-
-    try {
-      const verify = createVerify("SHA256");
-      verify.update(message);
-      const spkiDer = uncompressedP256ToSpki(pubkeyBytes);
-      const valid = verify.verify(
-        { key: spkiDer, format: "der", type: "spki" },
-        Buffer.from(hello.sig, "base64"),
-      );
-      if (!valid) {
-        return "invalid signature";
-      }
-    } catch {
-      return "signature verification failed";
-    }
-
-    return null;
-  }
-
-  // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
@@ -503,6 +455,33 @@ export class RelayServer extends EventEmitter {
     }
     return { status: resp.status, headers, body: resp.body };
   }
+}
+
+/**
+ * Validates hello.decrypt_pubkey structurally and as an on-curve P-256
+ * point. Required — every daemon advertises a split sign/decrypt identity.
+ * Returns null on success, or an error string on failure.
+ */
+function validateDecryptPubkey(hello: Hello): string | null {
+  if (hello.decryptPubkey === "") {
+    return "decrypt_pubkey is required";
+  }
+  let decryptBytes: Buffer;
+  try {
+    decryptBytes = Buffer.from(hello.decryptPubkey, "base64");
+  } catch {
+    return "invalid decrypt_pubkey encoding";
+  }
+  if (decryptBytes.length !== 65 || decryptBytes[0] !== 0x04) {
+    return "decrypt_pubkey must be 65 bytes starting with 0x04";
+  }
+  try {
+    const spkiDer = uncompressedP256ToSpki(decryptBytes);
+    createPublicKey({ key: spkiDer, format: "der", type: "spki" });
+  } catch {
+    return "decrypt_pubkey is not a valid P-256 point";
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

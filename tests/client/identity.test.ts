@@ -1,7 +1,8 @@
-import { createPublicKey, createVerify } from "node:crypto";
+import { X509Certificate } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { Identity } from "../../src/client/identity.js";
 import { buildSignedPayload, verifyECDSA } from "../../src/shared/crypto.js";
+import { extractP256PointFromCert, uuidFromP256Point } from "../../src/shared/certs.js";
 
 describe("Identity", () => {
   it("generates a P-256 keypair with valid uuid/pubkeys", async () => {
@@ -30,38 +31,34 @@ describe("Identity", () => {
     expect(id.uuid).toBe(hex);
   });
 
-  it("signs a challenge in DER format that round-trips Web Crypto verify", async () => {
+  it("mintClientCert wraps the sign key: cert SPKI point == signPubkeyB64", async () => {
     const id = await Identity.generate();
-    const nonce = "00".repeat(32);
-    const ts = 1_700_000_000;
-    const sigDerB64 = await id.signChallenge(nonce, ts);
-    expect(await id.verifyOwnSignature(nonce, ts, sigDerB64)).toBe(true);
+    const minted = await id.mintClientCert();
+
+    const cert = new X509Certificate(minted.certPem);
+    const point = extractP256PointFromCert(cert);
+    if (point === null) throw new Error("cert key is not P-256");
+    expect(point.toString("base64")).toBe(id.signPubkeyB64);
+    // The broker derives the uuid from this point — must match Identity.uuid.
+    expect(uuidFromP256Point(point)).toBe(id.uuid);
   });
 
-  it("signature verifies via Node's createVerify (broker compatibility)", async () => {
+  it("mintClientCert produces a fresh certificate each call over the same key", async () => {
     const id = await Identity.generate();
-    const nonce = "11".repeat(32);
-    const ts = 1_700_000_000;
-    const sigDerB64 = await id.signChallenge(nonce, ts);
+    const first = await id.mintClientCert();
+    const second = await id.mintClientCert();
 
-    // Reconstruct the same message bytes the broker hashes.
-    const nonceBytes = Buffer.from(nonce, "hex");
-    const tsBuf = Buffer.alloc(8);
-    tsBuf.writeBigUInt64BE(BigInt(ts));
-    const msg = Buffer.concat([nonceBytes, tsBuf]);
+    // Different certificates (random serial) …
+    expect(second.certPem).not.toBe(first.certPem);
+    const a = new X509Certificate(first.certPem);
+    const b = new X509Certificate(second.certPem);
+    expect(a.serialNumber).not.toBe(b.serialNumber);
 
-    // Use the raw uncompressed public key wrapped in SPKI DER to verify via Node's createVerify.
-    const rawPub = Buffer.from(id.signPubkeyB64, "base64");
-    const spkiPrefix = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
-    const spki = Buffer.concat([spkiPrefix, rawPub]);
-
-    const pubKey = createPublicKey({ key: spki, format: "der", type: "spki" });
-    const sigDerBuf = Buffer.from(sigDerB64, "base64");
-    const verify = createVerify("SHA256");
-    verify.update(msg);
-    // sigDerBuf is already raw DER bytes; pass without encoding argument.
-    const ok = verify.verify(pubKey, sigDerBuf);
-    expect(ok).toBe(true);
+    // … but always the same underlying identity key.
+    const pointA = extractP256PointFromCert(a);
+    const pointB = extractP256PointFromCert(b);
+    if (pointA === null || pointB === null) throw new Error("cert key is not P-256");
+    expect(pointA.equals(pointB)).toBe(true);
   });
 
   it("signAuthPayload signature verifies via Node's verifyECDSA (broker compat)", async () => {

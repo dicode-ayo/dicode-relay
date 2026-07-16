@@ -1,23 +1,23 @@
 /**
- * Broker auth route tests — real crypto, in-process RelayServer, no mocks.
+ * Broker auth route tests — real crypto, in-process mTLS RelayServer, no mocks.
  */
 
-import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
+import { randomBytes, createECDH } from "node:crypto";
 import type { Server } from "node:http";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WebSocket } from "ws";
 import { buildBrokerRouter } from "../../src/broker/router.js";
-import { buildSignedPayload } from "../../src/shared/crypto.js";
 import type { ProviderConfig } from "../../src/broker/providers.js";
-import { SessionStore } from "../../src/broker/sessions.js";
-import { RelayServer } from "../../src/relay/server.js";
+import { SessionStore, type Session } from "../../src/broker/sessions.js";
+import { Identity } from "../../src/client/identity.js";
 import {
-  helloEnvelope,
-  parseChallenge,
-  parseWelcome,
-  testRelayOpts,
+  startMtlsRelay,
+  testDaemon,
+  connectDaemon,
+  parseRequest,
+  responseEnvelope,
   testSessionTtlMs,
+  type MtlsRelayFixture,
 } from "../helpers.js";
 
 /** Test provider map with a single "github" provider. */
@@ -30,93 +30,27 @@ function testProviders(): ReadonlyMap<string, ProviderConfig> {
   ]);
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+/** Build the signed /auth/:provider URL for a daemon identity. */
+async function buildAuthUrl(
+  httpPort: number,
+  identity: Identity,
+  provider: string,
+  sessionId: string,
+  opts?: { timestamp?: number; sig?: string },
+): Promise<string> {
+  const pkceChallenge = randomBytes(32).toString("base64url");
+  const timestamp = opts?.timestamp ?? Math.floor(Date.now() / 1000);
+  const sig =
+    opts?.sig ?? (await identity.signAuthPayload(sessionId, pkceChallenge, provider, timestamp));
 
-function generateSigningIdentity(): {
-  uuid: string;
-  pubkeyBase64: string;
-  pubkeyBytes: Buffer;
-  decryptPubkeyBase64: string;
-  sign: (payload: Buffer) => string;
-} {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const spki = publicKey as Buffer;
-  const pubkeyBytes = Buffer.from(spki.subarray(spki.length - 65));
-  const uuid = createHash("sha256").update(pubkeyBytes).digest("hex");
-
-  const { publicKey: decryptPublicKey } = generateKeyPairSync("ec", {
-    namedCurve: "prime256v1",
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const decryptSpki = decryptPublicKey as Buffer;
-  const decryptPubkeyBytes = decryptSpki.subarray(decryptSpki.length - 65);
-
-  const sign = (payload: Buffer): string => {
-    const signer = createSign("SHA256");
-    signer.update(payload);
-    return signer.sign(privateKey, "base64");
-  };
-
-  return {
-    uuid,
-    pubkeyBase64: pubkeyBytes.toString("base64"),
-    pubkeyBytes,
-    decryptPubkeyBase64: decryptPubkeyBytes.toString("base64"),
-    sign,
-  };
-}
-
-function buildHelloPayload(nonce: string, timestamp: number): Buffer {
-  const nonceBytes = Buffer.from(nonce, "hex");
-  const tsBytes = Buffer.allocUnsafe(8);
-  tsBytes.writeBigUInt64BE(BigInt(timestamp));
-  return Buffer.concat([nonceBytes, tsBytes]);
-}
-
-/** Perform full relay handshake for a given identity, return connected ws */
-async function connectDaemon(
-  relayPort: number,
-  identity: ReturnType<typeof generateSigningIdentity>,
-): Promise<WebSocket> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://localhost:${relayPort.toString()}`);
-    ws.once("message", (data: Buffer | string) => {
-      const challenge = parseChallenge(data);
-      if (challenge === null) {
-        reject(new Error("Expected challenge envelope"));
-        return;
-      }
-      const timestamp = Math.floor(Date.now() / 1000);
-      const payload = buildHelloPayload(challenge.nonce, timestamp);
-      const sig = identity.sign(payload);
-
-      ws.send(
-        helloEnvelope({
-          uuid: identity.uuid,
-          pubkey: identity.pubkeyBase64,
-          decrypt_pubkey: identity.decryptPubkeyBase64,
-          sig,
-          timestamp,
-        }),
-      );
-
-      ws.once("message", (data2: Buffer | string) => {
-        if (parseWelcome(data2) !== null) {
-          resolve(ws);
-        } else {
-          reject(new Error(`Expected welcome envelope, got: ${data2.toString()}`));
-        }
-      });
-    });
-    ws.once("error", reject);
-  });
+  return (
+    `http://localhost:${httpPort.toString()}/auth/${provider}` +
+    `?session=${encodeURIComponent(sessionId)}` +
+    `&challenge=${encodeURIComponent(pkceChallenge)}` +
+    `&relay_uuid=${identity.uuid}` +
+    `&sig=${encodeURIComponent(sig)}` +
+    `&timestamp=${timestamp.toString()}`
+  );
 }
 
 /** Make an HTTP GET request and return status + body */
@@ -131,17 +65,17 @@ async function httpGet(url: string): Promise<{ status: number; body: string }> {
 // ---------------------------------------------------------------------------
 
 describe("Broker /auth/:provider", () => {
-  let relayServer: RelayServer;
+  let fixture: MtlsRelayFixture;
   let httpServer: Server;
   let httpPort: number;
   let sessions: SessionStore;
 
   beforeEach(async () => {
-    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
+    fixture = await startMtlsRelay({ baseUrl: "wss://relay.dicode.app" });
     sessions = new SessionStore(testSessionTtlMs);
 
     const app = express();
-    app.use(buildBrokerRouter(relayServer, sessions, testProviders()));
+    app.use(buildBrokerRouter(fixture.relay, sessions, testProviders()));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -164,35 +98,16 @@ describe("Broker /auth/:provider", () => {
         }
       });
     });
-    await relayServer.close();
+    await fixture.close();
     sessions.clear();
   });
 
   it("valid request with correct sig → 302 redirect to Grant", async () => {
-    const identity = generateSigningIdentity();
-    const daemonWs = await connectDaemon(relayServer.port, identity);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
-    const pkceChallenge = randomBytes(32).toString("base64url");
-    const timestamp = Math.floor(Date.now() / 1000);
-
-    const payload = buildSignedPayload(
-      sessionId,
-      pkceChallenge,
-      identity.uuid,
-      "github",
-      timestamp,
-    );
-    const sig = identity.sign(payload);
-
-    const url =
-      `http://localhost:${httpPort.toString()}/auth/github` +
-      `?session=${encodeURIComponent(sessionId)}` +
-      `&challenge=${encodeURIComponent(pkceChallenge)}` +
-      `&relay_uuid=${identity.uuid}` +
-      `&sig=${encodeURIComponent(sig)}` +
-      `&timestamp=${timestamp.toString()}`;
-
+    const url = await buildAuthUrl(httpPort, daemon.identity, "github", sessionId);
     const response = await fetch(url, { redirect: "manual" });
 
     expect(response.status).toBe(302);
@@ -203,7 +118,7 @@ describe("Broker /auth/:provider", () => {
     expect(sessions.get(sessionId)).toBeDefined();
     expect(sessions.get(sessionId)?.provider).toBe("github");
 
-    daemonWs.close();
+    ws.terminate();
   });
 
   it("missing relay_uuid → 400", async () => {
@@ -218,119 +133,58 @@ describe("Broker /auth/:provider", () => {
   });
 
   it("UUID not in relay registry → 403", async () => {
-    const identity = generateSigningIdentity();
-    // Do NOT connect this identity to relay
+    // Fresh identity that never connects to the relay.
+    const identity = await Identity.generate();
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
-    const pkceChallenge = randomBytes(32).toString("base64url");
-    const timestamp = Math.floor(Date.now() / 1000);
-
-    const payload = buildSignedPayload(
-      sessionId,
-      pkceChallenge,
-      identity.uuid,
-      "github",
-      timestamp,
-    );
-    const sig = identity.sign(payload);
-
-    const url =
-      `http://localhost:${httpPort.toString()}/auth/github` +
-      `?session=${encodeURIComponent(sessionId)}` +
-      `&challenge=${encodeURIComponent(pkceChallenge)}` +
-      `&relay_uuid=${identity.uuid}` +
-      `&sig=${encodeURIComponent(sig)}` +
-      `&timestamp=${timestamp.toString()}`;
+    const url = await buildAuthUrl(httpPort, identity, "github", sessionId);
 
     const { status } = await httpGet(url);
     expect(status).toBe(403);
   });
 
   it("bad ECDSA signature → 403", async () => {
-    const identity = generateSigningIdentity();
-    const daemonWs = await connectDaemon(relayServer.port, identity);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
-    const pkceChallenge = randomBytes(32).toString("base64url");
-    const timestamp = Math.floor(Date.now() / 1000);
-
     // Use a random (invalid) signature
     const badSig = randomBytes(64).toString("base64");
-
-    const url =
-      `http://localhost:${httpPort.toString()}/auth/github` +
-      `?session=${encodeURIComponent(sessionId)}` +
-      `&challenge=${encodeURIComponent(pkceChallenge)}` +
-      `&relay_uuid=${identity.uuid}` +
-      `&sig=${encodeURIComponent(badSig)}` +
-      `&timestamp=${timestamp.toString()}`;
+    const url = await buildAuthUrl(httpPort, daemon.identity, "github", sessionId, {
+      sig: badSig,
+    });
 
     const { status } = await httpGet(url);
     expect(status).toBe(403);
 
-    daemonWs.close();
+    ws.terminate();
   });
 
   it("stale timestamp → 403", async () => {
-    const identity = generateSigningIdentity();
-    const daemonWs = await connectDaemon(relayServer.port, identity);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
-    const pkceChallenge = randomBytes(32).toString("base64url");
     const timestamp = Math.floor(Date.now() / 1000) - 60; // 60 seconds ago
-
-    const payload = buildSignedPayload(
-      sessionId,
-      pkceChallenge,
-      identity.uuid,
-      "github",
-      timestamp,
-    );
-    const sig = identity.sign(payload);
-
-    const url =
-      `http://localhost:${httpPort.toString()}/auth/github` +
-      `?session=${encodeURIComponent(sessionId)}` +
-      `&challenge=${encodeURIComponent(pkceChallenge)}` +
-      `&relay_uuid=${identity.uuid}` +
-      `&sig=${encodeURIComponent(sig)}` +
-      `&timestamp=${timestamp.toString()}`;
+    const url = await buildAuthUrl(httpPort, daemon.identity, "github", sessionId, { timestamp });
 
     const { status } = await httpGet(url);
     expect(status).toBe(403);
 
-    daemonWs.close();
+    ws.terminate();
   });
 
   it("unknown provider → 404", async () => {
-    const identity = generateSigningIdentity();
-    const daemonWs = await connectDaemon(relayServer.port, identity);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
-    const pkceChallenge = randomBytes(32).toString("base64url");
-    const timestamp = Math.floor(Date.now() / 1000);
-
-    const payload = buildSignedPayload(
-      sessionId,
-      pkceChallenge,
-      identity.uuid,
-      "notarealProvider",
-      timestamp,
-    );
-    const sig = identity.sign(payload);
-
-    const url =
-      `http://localhost:${httpPort.toString()}/auth/notarealProvider` +
-      `?session=${encodeURIComponent(sessionId)}` +
-      `&challenge=${encodeURIComponent(pkceChallenge)}` +
-      `&relay_uuid=${identity.uuid}` +
-      `&sig=${encodeURIComponent(sig)}` +
-      `&timestamp=${timestamp.toString()}`;
+    const url = await buildAuthUrl(httpPort, daemon.identity, "notarealProvider", sessionId);
 
     const { status } = await httpGet(url);
     expect(status).toBe(404);
 
-    daemonWs.close();
+    ws.terminate();
   });
 
   it("missing session param → 400", async () => {
@@ -360,21 +214,18 @@ describe("Broker /auth/:provider", () => {
 // Callback route tests
 // ---------------------------------------------------------------------------
 
-import { createECDH } from "node:crypto";
-import type { Session } from "../../src/broker/sessions.js";
-
 describe("Broker /callback/:provider", () => {
-  let relayServer: RelayServer;
+  let fixture: MtlsRelayFixture;
   let httpServer: Server;
   let httpPort: number;
   let sessions: SessionStore;
 
   beforeEach(async () => {
-    relayServer = new RelayServer(testRelayOpts({ baseUrl: "wss://relay.dicode.app" }));
+    fixture = await startMtlsRelay({ baseUrl: "wss://relay.dicode.app" });
     sessions = new SessionStore(testSessionTtlMs);
 
     const app = express();
-    app.use(buildBrokerRouter(relayServer, sessions, testProviders()));
+    app.use(buildBrokerRouter(fixture.relay, sessions, testProviders()));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -397,7 +248,7 @@ describe("Broker /callback/:provider", () => {
         }
       });
     });
-    await relayServer.close();
+    await fixture.close();
     sessions.clear();
   });
 
@@ -432,16 +283,17 @@ describe("Broker /callback/:provider", () => {
   });
 
   it("valid callback with connected daemon → 200", async () => {
-    const identity = generateSigningIdentity();
-    const daemonWs = await connectDaemon(relayServer.port, identity);
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440001";
 
-    // Store a session pointing to the connected daemon
+    // Store a session pointing to the connected daemon. The ECIES recipient
+    // is the daemon's decrypt pubkey (v4 split identity).
     const session: Session = {
       sessionId,
-      relayUuid: identity.uuid,
-      pubkey: identity.pubkeyBytes,
+      relayUuid: daemon.identity.uuid,
+      pubkey: Buffer.from(daemon.identity.decryptPubkeyB64, "base64"),
       pkceChallenge: randomBytes(32).toString("base64url"),
       provider: "github",
       expiresAt: Date.now() + 5 * 60 * 1000,
@@ -449,20 +301,14 @@ describe("Broker /callback/:provider", () => {
     sessions.set(session);
 
     // Set up the daemon to respond to forwarded requests
-    daemonWs.on("message", (data: Buffer | string) => {
-      const env = JSON.parse(typeof data === "string" ? data : data.toString()) as Record<
-        string,
-        unknown
-      >;
-      const req = env.request as { id: string } | undefined;
-      if (req !== undefined) {
-        daemonWs.send(
-          JSON.stringify({
-            response: {
-              id: req.id,
-              status: 200,
-              body: Buffer.from("{}").toString("base64"),
-            },
+    ws.on("message", (data: Buffer | string) => {
+      const req = parseRequest(data);
+      if (req !== null) {
+        ws.send(
+          responseEnvelope({
+            id: req.id,
+            status: 200,
+            body: Buffer.from("{}").toString("base64"),
           }),
         );
       }
@@ -480,7 +326,7 @@ describe("Broker /callback/:provider", () => {
     // Session should be deleted after delivery
     expect(sessions.get(sessionId)).toBeUndefined();
 
-    daemonWs.close();
+    ws.terminate();
   });
 
   it("callback with daemon not connected → 503", async () => {

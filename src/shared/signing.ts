@@ -28,6 +28,7 @@ import {
 } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { lengthPrefixed } from "./crypto.js";
 
 const AUTO_KEY_FILENAME = "broker-signing-key.pem";
 
@@ -46,7 +47,8 @@ export interface BrokerSigningKey {
  *     MUST exist; this branch never auto-generates. Operators who land an
  *     explicit path opt into managing the key lifecycle themselves —
  *     auto-generating at a typo'd path would silently rotate the broker
- *     pubkey and break every TOFU-pinned daemon (see issue #54).
+ *     pubkey and invalidate delivery signatures for daemons that have not
+ *     reconnected since the rotation (see issue #54).
  *   - If no env/inline/YAML source is set, the legacy cwd fallback at
  *     `<cwd>/broker-signing-key.pem` is consulted; on first start it is
  *     auto-generated (with `mkdir -p` for the parent dir, in case cwd's
@@ -79,8 +81,8 @@ export function loadBrokerSigningKey(
   } else if (signingKeyFile !== "") {
     // A YAML-configured `broker.signing_key_file` was provided. This path is
     // operator-trusted: do NOT auto-generate at it if it's missing — that
-    // would mask typos (rotating the broker pubkey to a wrong location and
-    // breaking TOFU-pinned daemons). Issue #54 tracks a broader hardening of
+    // would mask typos (silently rotating the broker pubkey from a wrong
+    // location). Issue #54 tracks a broader hardening of
     // when auto-gen is allowed to fire at all. Surface ENOENT with a clear
     // message naming the path so operators can spot the typo or pre-create
     // the file via their orchestration layer.
@@ -148,15 +150,20 @@ function loadKeyPair(pem: string) {
   return { privateKey, publicKey };
 }
 
+/** Domain-separation label for the delivery-envelope signature (v4). */
+const DELIVERY_LABEL = Buffer.from("dicode/oauth-token-delivery/v4", "utf8");
+
 /**
  * Build the byte sequence that the broker signs over a delivery envelope.
  * The daemon must reconstruct this exact sequence for verification.
  *
- *   sha256(type || session_id || ephemeral_pubkey || ciphertext || nonce)
+ *   sha256("dicode/oauth-token-delivery/v4"
+ *          || lp(type) || lp(session_id) || lp(ephemeral_pubkey)
+ *          || lp(ciphertext) || lp(nonce))
  *
- * All fields are UTF-8 encoded (they're already base64/ASCII strings in
- * the envelope JSON). The input is the concatenation of the five immutable
- * envelope fields in wire order.
+ * where lp(x) = uint32_be(len(x)) || x. All fields are UTF-8 encoded
+ * (they're already base64/ASCII strings in the envelope JSON); the length
+ * prefixes make the variable-length concatenation injective.
  */
 export function buildDeliverySignaturePayload(
   type: string,
@@ -165,13 +172,11 @@ export function buildDeliverySignaturePayload(
   ciphertext: string,
   nonce: string,
 ): Buffer {
-  return createHash("sha256")
-    .update(type)
-    .update(sessionId)
-    .update(ephemeralPubkey)
-    .update(ciphertext)
-    .update(nonce)
-    .digest();
+  const hash = createHash("sha256").update(DELIVERY_LABEL);
+  for (const field of [type, sessionId, ephemeralPubkey, ciphertext, nonce]) {
+    hash.update(lengthPrefixed(Buffer.from(field, "utf8")));
+  }
+  return hash.digest();
 }
 
 /**

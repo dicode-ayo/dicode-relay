@@ -2,8 +2,17 @@
  * Programmatic entry point for dicode-relay.
  *
  * `startServer(opts)` wires together the express app, relay WebSocket server,
- * Grant OAuth middleware, and broker router, and (unless `dryRun: true`) starts
- * an HTTP(S) listener on the configured port.
+ * Grant OAuth middleware, and broker router, and (unless `dryRun: true`)
+ * starts two listeners:
+ *
+ *   - the public listener (`server.port`): webhooks (/u/:uuid/hooks/*),
+ *     OAuth routes, /status, /health. Plain HTTP or one-cert TLS — typically
+ *     behind a TLS-terminating proxy (Cloudflare, nginx).
+ *   - the mTLS listener (`server.mtls.port`): the daemon control channel.
+ *     Always TLS with `requestCert: true` — the peer certificate carries the
+ *     daemon identity. This port must be reachable with END-TO-END TLS
+ *     passthrough (L4 load balancing only); a terminating proxy in front of
+ *     it would strip the client certificate.
  *
  * This module has no top-level side effects: importing it neither parses
  * CLI args nor binds ports. The bin entrypoint (`src/index.ts`) layers
@@ -12,13 +21,15 @@
  * `dryRun: true` performs full configuration + signing-key + provider wiring
  * (so config-shape and disk/permission errors surface) but skips `listen()`
  * and starts no keepalive timers. Callers receive a handle whose `close()` is
- * a safe no-op against the unbound socket.
+ * a safe no-op against the unbound sockets.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import express from "express";
+import { generateSelfSignedServerCert } from "./shared/certs.js";
 import { ConfigSchema, loadConfig, type RelayConfig } from "./config.js";
 import { RelayServer } from "./relay/server.js";
 import { buildGrantMiddleware } from "./broker/grant.js";
@@ -51,14 +62,16 @@ export interface StartOpts {
 }
 
 export interface StartHandle {
-  /** Underlying Node HTTP(S) server. `listening === false` when `dryRun: true`. */
+  /** Public listener (webhooks/OAuth/status). `listening === false` when `dryRun: true`. */
   httpServer: HttpServer | HttpsServer;
+  /** mTLS daemon control-channel listener. `listening === false` when `dryRun: true`. */
+  mtlsServer: HttpsServer;
   /** The RelayServer instance (WebSocket tunnel). */
   relayServer: RelayServer;
   /**
-   * Gracefully shut down: closes the HTTP server and the RelayServer.
-   * Safe no-op for the HTTP listener when `dryRun: true` (the socket was
-   * never bound). Always closes the RelayServer to release in-memory state.
+   * Gracefully shut down: closes both listeners and the RelayServer.
+   * Safe no-op for the listeners when `dryRun: true` (sockets never bound).
+   * Always closes the RelayServer to release in-memory state.
    */
   close: () => Promise<void>;
 }
@@ -100,6 +113,27 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   }
 
   // -------------------------------------------------------------------------
+  // mTLS control-channel listener
+  // -------------------------------------------------------------------------
+
+  // The daemon WS endpoint lives on its own TLS listener with client
+  // certificates requested. The chain is NOT verified (`rejectUnauthorized:
+  // false`) — a daemon's self-signed cert IS its identity; RelayServer
+  // rejects connections without a P-256 client cert at the WS layer.
+  const mtlsCert = await resolveMtlsCert(serverCfg, opts.dryRun === true);
+  const mtlsServer = createHttpsServer({
+    cert: mtlsCert.certPem,
+    key: mtlsCert.keyPem,
+    requestCert: true,
+    rejectUnauthorized: false,
+  });
+  // Non-upgrade HTTP requests have no business on this port.
+  mtlsServer.on("request", (_req, res) => {
+    res.writeHead(426, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "WebSocket upgrade required" }));
+  });
+
+  // -------------------------------------------------------------------------
   // Broker signing key
   // -------------------------------------------------------------------------
 
@@ -119,12 +153,10 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
 
   const relayServer = new RelayServer({
     baseUrl: serverCfg.base_url,
-    server: httpServer,
-    timestampToleranceS: relayCfg.timestamp_tolerance_s,
+    server: mtlsServer,
     pingIntervalMs: relayCfg.ping_interval_ms,
     pongTimeoutMs: relayCfg.pong_timeout_ms,
     requestTimeoutMs: relayCfg.request_timeout_ms,
-    nonceTtlMs: relayCfg.nonce_ttl_ms,
     brokerPubkey: brokerKey.publicKeyBase64,
   });
 
@@ -280,42 +312,133 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   // -------------------------------------------------------------------------
 
   const close = async (): Promise<void> => {
-    // Always close the relay server (clears nonces, terminates client sockets,
-    // shuts down the WebSocketServer). In dryRun mode the WSS is attached to
-    // an unbound HTTP server, but RelayServer.close() still cleans up safely.
+    // Always close the relay server (terminates client sockets, shuts down
+    // the WebSocketServer). In dryRun mode the WSS is attached to an unbound
+    // HTTPS server, but RelayServer.close() still cleans up safely.
     await relayServer.close();
 
-    // If the HTTP server was never bound (dryRun), `close()` invokes its
-    // callback with an ERR_SERVER_NOT_RUNNING error. Treat that as a no-op.
-    await new Promise<void>((resolve, reject) => {
-      if (!httpServer.listening) {
-        resolve();
-        return;
-      }
-      httpServer.close((err) => {
-        if (err !== undefined) {
-          reject(err);
-        } else {
+    // If a listener was never bound (dryRun), `close()` invokes its callback
+    // with an ERR_SERVER_NOT_RUNNING error. Treat that as a no-op.
+    const closeListener = (srv: HttpServer | HttpsServer): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        if (!srv.listening) {
           resolve();
+          return;
         }
+        srv.close((err) => {
+          if (err !== undefined) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
       });
-    });
+    await closeListener(httpServer);
+    await closeListener(mtlsServer);
   };
 
   if (opts.dryRun === true) {
-    return { httpServer, relayServer, close };
+    return { httpServer, mtlsServer, relayServer, close };
   }
 
-  await new Promise<void>((resolve, reject) => {
-    httpServer.once("error", reject);
-    httpServer.listen(serverCfg.port, () => {
-      httpServer.removeListener("error", reject);
-      console.log(`dicode-relay listening on port ${String(serverCfg.port)}`);
-      console.log(`Base URL: ${serverCfg.base_url}`);
-      console.log(`Providers: ${[...brokerProviders.keys()].join(", ") || "(none configured)"}`);
-      resolve();
+  const listen = (srv: HttpServer | HttpsServer, port: number): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      srv.once("error", reject);
+      srv.listen(port, () => {
+        srv.removeListener("error", reject);
+        resolve();
+      });
     });
-  });
 
-  return { httpServer, relayServer, close };
+  await listen(httpServer, serverCfg.port);
+  await listen(mtlsServer, serverCfg.mtls.port);
+  console.log(`dicode-relay listening on port ${String(serverCfg.port)}`);
+  console.log(`dicode-relay mTLS control channel on port ${String(serverCfg.mtls.port)}`);
+  console.log(`Base URL: ${serverCfg.base_url}`);
+  console.log(`Providers: ${[...brokerProviders.keys()].join(", ") || "(none configured)"}`);
+
+  return { httpServer, mtlsServer, relayServer, close };
+}
+
+// ---------------------------------------------------------------------------
+// mTLS certificate resolution
+// ---------------------------------------------------------------------------
+
+const AUTO_MTLS_CERT_FILENAME = "relay-mtls-cert.pem";
+const AUTO_MTLS_KEY_FILENAME = "relay-mtls-key.pem";
+
+interface MtlsCertPems {
+  certPem: string;
+  keyPem: string;
+}
+
+/**
+ * Resolve the mTLS listener's server certificate.
+ *
+ * Resolution order:
+ *   1. `server.mtls.cert_file` + `key_file` — operator-managed (e.g. the
+ *      wildcard LE cert). Must exist; never auto-generates at an explicit
+ *      path (same rationale as loadBrokerSigningKey).
+ *   2. Fall back to `server.tls.*` when set — reuse the public listener cert.
+ *   3. Auto-generate a persistent self-signed dev cert at
+ *      `<cwd>/relay-mtls-cert.pem` / `-key.pem` (CA:FALSE — required by
+ *      rustls-based daemons). Daemons trust it via an explicit CA option.
+ *      In dryRun the cert is ephemeral and never written to disk.
+ */
+async function resolveMtlsCert(
+  serverCfg: RelayConfig["server"],
+  dryRun: boolean,
+): Promise<MtlsCertPems> {
+  const explicit = serverCfg.mtls;
+  if (explicit.cert_file !== "" && explicit.key_file !== "") {
+    for (const f of [explicit.cert_file, explicit.key_file]) {
+      if (!existsSync(f)) {
+        throw new Error(
+          `server.mtls points to a missing file: ${f}. ` +
+            `Create the cert/key pair or unset server.mtls.cert_file/key_file ` +
+            `to fall back to server.tls or an auto-generated dev cert.`,
+        );
+      }
+    }
+    return {
+      certPem: readFileSync(explicit.cert_file, "utf8"),
+      keyPem: readFileSync(explicit.key_file, "utf8"),
+    };
+  }
+
+  if (serverCfg.tls.cert_file !== "" && serverCfg.tls.key_file !== "") {
+    return {
+      certPem: readFileSync(serverCfg.tls.cert_file, "utf8"),
+      keyPem: readFileSync(serverCfg.tls.key_file, "utf8"),
+    };
+  }
+
+  const certPath = join(process.cwd(), AUTO_MTLS_CERT_FILENAME);
+  const keyPath = join(process.cwd(), AUTO_MTLS_KEY_FILENAME);
+  if (existsSync(certPath) && existsSync(keyPath)) {
+    return {
+      certPem: readFileSync(certPath, "utf8"),
+      keyPem: readFileSync(keyPath, "utf8"),
+    };
+  }
+
+  const hosts: string[] = [];
+  try {
+    const host = new URL(serverCfg.base_url).hostname;
+    if (host !== "") hosts.push(host);
+  } catch {
+    // base_url unparsable — SANs default to localhost/127.0.0.1 only.
+  }
+  const generated = await generateSelfSignedServerCert({ hosts });
+  if (!dryRun) {
+    mkdirSync(dirname(certPath), { recursive: true });
+    writeFileSync(certPath, generated.certPem, { mode: 0o644 });
+    writeFileSync(keyPath, generated.keyPem, { mode: 0o600 });
+    console.warn(
+      `relay: generated self-signed mTLS server cert at ${certPath} — ` +
+        `point daemons' relay.ca_file at it, or set server.mtls.cert_file/key_file ` +
+        `to use an operator-managed certificate`,
+    );
+  }
+  return generated;
 }

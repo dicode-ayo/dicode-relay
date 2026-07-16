@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { createServer as createNetServer, type Socket } from "node:net";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { WebSocketServer } from "ws";
 
-import { RelayServer } from "../../src/relay/server.js";
 import { Identity } from "../../src/client/identity.js";
-import { RelayClient } from "../../src/client/client.js";
-import { loadBrokerSigningKey } from "../../src/shared/signing.js";
-import { testRelayOpts } from "../helpers.js";
-import type { TofuResult } from "../../src/client/handshake.js";
+import { RelayClient, type RelayStatus } from "../../src/client/client.js";
+import { loadBrokerSigningKey, type BrokerSigningKey } from "../../src/shared/signing.js";
+import {
+  startMtlsRelay,
+  testDaemon,
+  testServerCert,
+  type MtlsRelayFixture,
+  type TestDaemon,
+} from "../helpers.js";
 
 function silentLogger() {
   const noop = (_msg: string, _meta?: Record<string, unknown>): void => {
@@ -20,69 +24,133 @@ function silentLogger() {
   return { info: noop, warn: noop, error: noop };
 }
 
-describe("RelayClient end-to-end", () => {
-  it("connects to RelayServer, completes handshake, forwards request and response", async () => {
-    // 1. Start a local HTTP server that the client will forward webhooks to.
-    let receivedBody = "";
-    const localApp: HttpServer = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => {
-        chunks.push(c);
-      });
-      req.on("end", () => {
-        receivedBody = Buffer.concat(chunks).toString("utf8");
-        res.writeHead(200, { "Content-Type": "text/plain" });
-        res.end(`echo:${receivedBody}`);
-      });
-    });
-    await new Promise<void>((r) => {
-      localApp.listen(0, () => {
-        r();
-      });
-    });
-    const localPort = (localApp.address() as AddressInfo).port;
+/** In-memory broker signing key — no disk writes. */
+function ephemeralBrokerKey(): BrokerSigningKey {
+  const pair = generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  return loadBrokerSigningKey({ BROKER_SIGNING_KEY: pair.privateKey }, "/tmp");
+}
 
-    // 2. Start RelayServer on a random port (port: 0 → OS assigns a free port).
-    const tmp = mkdtempSync(join(tmpdir(), "broker-key-"));
-    const broker = loadBrokerSigningKey({}, tmp);
-    const relay = new RelayServer(
-      testRelayOpts({
-        baseUrl: "ws://127.0.0.1",
-        brokerPubkey: broker.publicKeyBase64,
+/** Local HTTP app the client forwards webhooks to; echoes the body back. */
+async function startLocalEcho(): Promise<{
+  server: HttpServer;
+  port: number;
+  received: () => string;
+  close: () => Promise<void>;
+}> {
+  let receivedBody = "";
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => {
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      receivedBody = Buffer.concat(chunks).toString("utf8");
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(`echo:${receivedBody}`);
+    });
+  });
+  await new Promise<void>((r) => {
+    server.listen(0, () => {
+      r();
+    });
+  });
+  return {
+    server,
+    port: (server.address() as AddressInfo).port,
+    received: () => receivedBody,
+    close: () =>
+      new Promise<void>((r) => {
+        server.close(() => {
+          r();
+        });
       }),
-    );
-    const relayPort = relay.port;
+  };
+}
 
-    // 3. Build a RelayClient with an inline TOFU callback.
-    const id = await Identity.generate();
-    let pinnedBrokerKey: string | null = null;
-    const tofuCheckAndPin = (brokerPubkeyB64: string): Promise<TofuResult> => {
-      if (pinnedBrokerKey === null) {
-        pinnedBrokerKey = brokerPubkeyB64;
-        return Promise.resolve("new");
+function clientTls(
+  daemon: TestDaemon,
+  fixture: MtlsRelayFixture,
+): { certPem: string; keyPem: string; ca: string } {
+  return { certPem: daemon.cert.certPem, keyPem: daemon.cert.keyPem, ca: fixture.ca };
+}
+
+/** Resolves when the relay registers the given uuid. */
+function waitForRegistration(fixture: MtlsRelayFixture, uuid: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (fixture.relay.hasClient(uuid)) {
+      resolve();
+      return;
+    }
+    const onConnected = (u: string): void => {
+      if (u === uuid) {
+        fixture.relay.removeListener("client:connected", onConnected);
+        resolve();
       }
-      return Promise.resolve(pinnedBrokerKey === brokerPubkeyB64 ? "match" : "mismatch");
     };
+    fixture.relay.on("client:connected", onConnected);
+  });
+}
+
+describe("RelayClient end-to-end", () => {
+  it("connects over mTLS, completes handshake, forwards request and response", async () => {
+    const localApp = await startLocalEcho();
+    const broker = ephemeralBrokerKey();
+    const fixture = await startMtlsRelay({
+      baseUrl: "ws://127.0.0.1",
+      brokerPubkey: broker.publicKeyBase64,
+    });
+    const daemon = await testDaemon(fixture);
+
+    // onBrokerPubkey must be awaited BEFORE the status flips to connected.
+    const announcedKeys: string[] = [];
+    let brokerKeyPersisted = false;
+    const onBrokerPubkey = (k: string): Promise<void> => {
+      announcedKeys.push(k);
+      return new Promise((r) => {
+        setImmediate(() => {
+          brokerKeyPersisted = true;
+          r();
+        });
+      });
+    };
+
+    const statuses: RelayStatus[] = [];
+    let persistedWhenConnected: boolean | undefined;
+    let signalConnected: (() => void) | undefined;
+    const clientConnected = new Promise<void>((resolve) => {
+      signalConnected = resolve;
+    });
     const ac = new AbortController();
     const client = new RelayClient({
-      serverURL: `ws://127.0.0.1:${String(relayPort)}/`,
-      localPort,
-      identity: id,
-      tofuCheckAndPin,
+      serverURL: fixture.url,
+      localPort: localApp.port,
+      identity: daemon.identity,
+      tls: clientTls(daemon, fixture),
+      onBrokerPubkey,
+      onStatus: (s) => {
+        statuses.push({ ...s });
+        if (s.connected && persistedWhenConnected === undefined) {
+          persistedWhenConnected = brokerKeyPersisted;
+          signalConnected?.();
+        }
+      },
       log: silentLogger(),
     });
     const runPromise = client.run(ac.signal);
 
-    // 4. Wait for the client to register on the relay (poll for ~2s).
-    const deadline = Date.now() + 2_000;
-    while (Date.now() < deadline && !relay.hasClient(id.uuid)) {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(relay.hasClient(id.uuid)).toBe(true);
+    // Wait for the client to report connected (not merely for the relay-side
+    // registration): the client only starts serving request frames after it
+    // has awaited onBrokerPubkey, and a forward sent before that would race
+    // the serve() listener attachment.
+    await clientConnected;
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(true);
 
-    // 5. Forward a request through the relay → client → local app.
-    const resp = await relay.forward(
-      id.uuid,
+    const resp = await fixture.relay.forward(
+      daemon.identity.uuid,
       "POST",
       "/hooks/test",
       { "Content-Type": ["text/plain"] },
@@ -90,27 +158,244 @@ describe("RelayClient end-to-end", () => {
     );
     expect(resp.status).toBe(200);
     expect(Buffer.from(resp.body, "base64").toString("utf8")).toBe("echo:hello");
-    expect(receivedBody).toBe("hello");
+    expect(localApp.received()).toBe("hello");
 
-    // 6. Tear down.
+    // Broker pubkey announced in welcome → surfaced through the callback,
+    // and awaited before the connected status was reported.
+    expect(announcedKeys).toEqual([broker.publicKeyBase64]);
+    expect(persistedWhenConnected).toBe(true);
+
+    const connectedStatus = statuses.find((s) => s.connected);
+    expect(connectedStatus).toBeDefined();
+    expect(connectedStatus?.hook_base_url).toBe(`ws://127.0.0.1/u/${daemon.identity.uuid}/hooks/`);
+    expect(connectedStatus?.broker_pubkey).toBe(broker.publicKeyBase64);
+
     ac.abort();
     await runPromise.catch(() => undefined);
-    await relay.close();
+    await fixture.close();
+    await localApp.close();
+  }, 10_000);
+
+  it("does not lose a request forwarded while onBrokerPubkey is still awaiting", async () => {
+    // The broker registers the daemon (and can start forwarding) as soon as
+    // it sends welcome — potentially before the client finishes awaiting the
+    // consumer's onBrokerPubkey persistence. A frame arriving in that window
+    // must be buffered by the handshake adapter and replayed into serve(),
+    // not dropped into a listener-less gap.
+    const localApp = await startLocalEcho();
+    const broker = ephemeralBrokerKey();
+    const fixture = await startMtlsRelay({
+      baseUrl: "ws://127.0.0.1",
+      brokerPubkey: broker.publicKeyBase64,
+    });
+    const daemon = await testDaemon(fixture);
+
+    // Slow persistence: hold onBrokerPubkey open until the forward below has
+    // been sent into the tunnel.
+    let releasePersist: (() => void) | undefined;
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    const ac = new AbortController();
+    const client = new RelayClient({
+      serverURL: fixture.url,
+      localPort: localApp.port,
+      identity: daemon.identity,
+      tls: clientTls(daemon, fixture),
+      onBrokerPubkey: () => persistGate,
+      log: silentLogger(),
+    });
+    const runPromise = client.run(ac.signal);
+
+    // Registration happens broker-side at welcome time — the client is still
+    // parked inside onBrokerPubkey here.
+    await waitForRegistration(fixture, daemon.identity.uuid);
+    const forwardPromise = fixture.relay.forward(
+      daemon.identity.uuid,
+      "POST",
+      "/hooks/test",
+      { "Content-Type": ["text/plain"] },
+      Buffer.from("mid-persist"),
+    );
+    // Give the frame time to traverse the tunnel while persistence is held.
+    await new Promise((r) => setImmediate(r));
+    releasePersist?.();
+
+    const resp = await forwardPromise;
+    expect(resp.status).toBe(200);
+    expect(Buffer.from(resp.body, "base64").toString("utf8")).toBe("echo:mid-persist");
+
+    ac.abort();
+    await runPromise.catch(() => undefined);
+    await fixture.close();
+    await localApp.close();
+  }, 10_000);
+
+  it("handshake timeout fires when the broker accepts but never answers (issue #92)", async () => {
+    // A real TLS+WS server that completes the upgrade and then stays silent —
+    // the v3 hang: recv() waited forever, runOnce never returned, the
+    // reconnect loop never fired.
+    const serverCert = await testServerCert();
+    const silent = createHttpsServer({
+      cert: serverCert.certPem,
+      key: serverCert.keyPem,
+      requestCert: true,
+      rejectUnauthorized: false,
+    });
+    const wss = new WebSocketServer({ server: silent });
+    wss.on("connection", () => {
+      /* accept and say nothing */
+    });
     await new Promise<void>((r) => {
-      localApp.close(() => {
+      silent.listen(0, "127.0.0.1", () => {
         r();
       });
     });
+    const port = (silent.address() as AddressInfo).port;
+
+    const id = await Identity.generate();
+    const cert = await id.mintClientCert();
+    const errors: string[] = [];
+    const ac = new AbortController();
+    const client = new RelayClient({
+      serverURL: `wss://127.0.0.1:${String(port)}/`,
+      localPort: 1,
+      identity: id,
+      tls: { certPem: cert.certPem, keyPem: cert.keyPem, ca: serverCert.certPem },
+      log: silentLogger(),
+      handshakeTimeoutMs: 200,
+      onStatus: (s) => {
+        if (s.last_error !== undefined) errors.push(s.last_error);
+      },
+    });
+    const runPromise = client.run(ac.signal);
+
+    // Without the deadline this would hang far past 200ms.
+    await new Promise((r) => setTimeout(r, 800));
+    ac.abort();
+    await Promise.race([
+      runPromise.catch(() => undefined),
+      new Promise((r) => setTimeout(r, 3_000)),
+    ]);
+    await new Promise<void>((r) => {
+      wss.close(() => {
+        silent.close(() => {
+          r();
+        });
+      });
+    });
+
+    expect(errors.some((e) => e.includes("handshake timeout"))).toBe(true);
+  }, 10_000);
+
+  it("socket close during handshake rejects promptly instead of hanging recv()", async () => {
+    // Broker accepts the WS then immediately closes it without a welcome.
+    const serverCert = await testServerCert();
+    const slammer = createHttpsServer({
+      cert: serverCert.certPem,
+      key: serverCert.keyPem,
+      requestCert: true,
+      rejectUnauthorized: false,
+    });
+    const wss = new WebSocketServer({ server: slammer });
+    wss.on("connection", (ws) => {
+      ws.close(1011, "go away");
+    });
+    await new Promise<void>((r) => {
+      slammer.listen(0, "127.0.0.1", () => {
+        r();
+      });
+    });
+    const port = (slammer.address() as AddressInfo).port;
+
+    const id = await Identity.generate();
+    const cert = await id.mintClientCert();
+    const errors: string[] = [];
+    const ac = new AbortController();
+    const client = new RelayClient({
+      serverURL: `wss://127.0.0.1:${String(port)}/`,
+      localPort: 1,
+      identity: id,
+      tls: { certPem: cert.certPem, keyPem: cert.keyPem, ca: serverCert.certPem },
+      log: silentLogger(),
+      // Long deadline on purpose: the prompt rejection must come from the
+      // close-listener path, not from the handshake timer.
+      handshakeTimeoutMs: 8_000,
+      onStatus: (s) => {
+        if (s.last_error !== undefined) errors.push(s.last_error);
+      },
+    });
+    const runPromise = client.run(ac.signal);
+
+    await new Promise((r) => setTimeout(r, 500));
+    ac.abort();
+    await Promise.race([
+      runPromise.catch(() => undefined),
+      new Promise((r) => setTimeout(r, 3_000)),
+    ]);
+    await new Promise<void>((r) => {
+      wss.close(() => {
+        slammer.close(() => {
+          r();
+        });
+      });
+    });
+
+    expect(errors.some((e) => e.includes("socket closed during handshake"))).toBe(true);
+  }, 10_000);
+
+  it("refuses to connect when the broker's server cert is untrusted (no ca, non-WebPKI)", async () => {
+    // The daemon must never trust a self-signed broker without an explicit
+    // ca — otherwise the welcome/broker_pubkey it persists would come from
+    // an unauthenticated channel. Omitting `ca` leaves the https.Agent at
+    // rejectUnauthorized: true, so the self-signed broker cert fails
+    // verification and the connection never establishes.
+    const fixture = await startMtlsRelay({ baseUrl: "ws://127.0.0.1" });
+    const daemon = await testDaemon(fixture);
+
+    let brokerKeySeen = false;
+    const errors: string[] = [];
+    const ac = new AbortController();
+    const client = new RelayClient({
+      serverURL: fixture.url,
+      localPort: 1,
+      identity: daemon.identity,
+      // Deliberately omit ca — the broker cert is self-signed and not WebPKI.
+      tls: { certPem: daemon.cert.certPem, keyPem: daemon.cert.keyPem },
+      onBrokerPubkey: () => {
+        brokerKeySeen = true;
+        return Promise.resolve();
+      },
+      log: silentLogger(),
+      onStatus: (s) => {
+        if (s.last_error !== undefined) errors.push(s.last_error);
+      },
+    });
+    const runPromise = client.run(ac.signal);
+
+    await new Promise((r) => setTimeout(r, 600));
+    ac.abort();
+    await Promise.race([
+      runPromise.catch(() => undefined),
+      new Promise((r) => setTimeout(r, 3_000)),
+    ]);
+    await fixture.close();
+
+    // Never registered on the broker, never surfaced a broker key, and did
+    // report connection errors.
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(false);
+    expect(brokerKeySeen).toBe(false);
+    expect(errors.length).toBeGreaterThan(0);
   }, 10_000);
 
   it("dial timeout aborts cleanly and backs off — no unhandled 'error' crash", async () => {
-    // A TCP server that accepts the connection but never completes the WS
-    // upgrade, so the dial hangs until dialTimeoutMs fires. terminate() on a
+    // A TCP server that accepts the connection but never completes the TLS
+    // handshake, so the dial hangs until dialTimeoutMs fires. terminate() on a
     // still-CONNECTING socket emits 'error' on the next tick; if that isn't
     // swallowed it becomes an uncaughtException instead of a backoff.
     const conns = new Set<Socket>();
     const stuck = createNetServer((sock) => {
-      // accept + hold the socket; never speak HTTP/WS
+      // accept + hold the socket; never speak TLS/HTTP/WS
       conns.add(sock);
       sock.on("close", () => conns.delete(sock));
     });
@@ -128,12 +413,13 @@ describe("RelayClient end-to-end", () => {
     process.on("uncaughtException", onUncaught);
 
     const id = await Identity.generate();
+    const cert = await id.mintClientCert();
     const ac = new AbortController();
     const client = new RelayClient({
-      serverURL: `ws://127.0.0.1:${String(stuckPort)}/`,
+      serverURL: `wss://127.0.0.1:${String(stuckPort)}/`,
       localPort: 1,
       identity: id,
-      tofuCheckAndPin: () => Promise.resolve("new" as TofuResult),
+      tls: { certPem: cert.certPem, keyPem: cert.keyPem },
       log: silentLogger(),
       dialTimeoutMs: 150,
     });
@@ -165,79 +451,45 @@ describe("RelayClient end-to-end", () => {
     // Happy-path stack with a short dial timeout, then a wait longer than it
     // before forwarding: proves the dial timer is cleared on 'open' and never
     // tears an established connection down.
-    let receivedBody = "";
-    const localApp: HttpServer = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => {
-        chunks.push(c);
-      });
-      req.on("end", () => {
-        receivedBody = Buffer.concat(chunks).toString("utf8");
-        res.writeHead(200, { "Content-Type": "text/plain" });
-        res.end(`echo:${receivedBody}`);
-      });
+    const localApp = await startLocalEcho();
+    const broker = ephemeralBrokerKey();
+    const fixture = await startMtlsRelay({
+      baseUrl: "ws://127.0.0.1",
+      brokerPubkey: broker.publicKeyBase64,
     });
-    await new Promise<void>((r) => {
-      localApp.listen(0, () => {
-        r();
-      });
-    });
-    const localPort = (localApp.address() as AddressInfo).port;
+    const daemon = await testDaemon(fixture);
 
-    const tmp = mkdtempSync(join(tmpdir(), "broker-key-"));
-    const broker = loadBrokerSigningKey({}, tmp);
-    const relay = new RelayServer(
-      testRelayOpts({ baseUrl: "ws://127.0.0.1", brokerPubkey: broker.publicKeyBase64 }),
-    );
-    const relayPort = relay.port;
-
-    const id = await Identity.generate();
-    let pinned: string | null = null;
-    const tofuCheckAndPin = (k: string): Promise<TofuResult> => {
-      if (pinned === null) {
-        pinned = k;
-        return Promise.resolve("new");
-      }
-      return Promise.resolve(pinned === k ? "match" : "mismatch");
-    };
     const ac = new AbortController();
     const client = new RelayClient({
-      serverURL: `ws://127.0.0.1:${String(relayPort)}/`,
-      localPort,
-      identity: id,
-      tofuCheckAndPin,
+      serverURL: fixture.url,
+      localPort: localApp.port,
+      identity: daemon.identity,
+      tls: clientTls(daemon, fixture),
       log: silentLogger(),
       dialTimeoutMs: 150,
     });
     const runPromise = client.run(ac.signal);
 
-    const deadline = Date.now() + 2_000;
-    while (Date.now() < deadline && !relay.hasClient(id.uuid)) {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(relay.hasClient(id.uuid)).toBe(true);
+    await waitForRegistration(fixture, daemon.identity.uuid);
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(true);
 
     // Wait well past the 150ms dial timeout — a stale timer would kill it here.
     await new Promise((r) => setTimeout(r, 500));
-    expect(relay.hasClient(id.uuid)).toBe(true);
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(true);
 
-    const resp = await relay.forward(
-      id.uuid,
+    const resp = await fixture.relay.forward(
+      daemon.identity.uuid,
       "POST",
       "/hooks/test",
       { "Content-Type": ["text/plain"] },
       Buffer.from("hello"),
     );
     expect(resp.status).toBe(200);
-    expect(receivedBody).toBe("hello");
+    expect(localApp.received()).toBe("hello");
 
     ac.abort();
     await runPromise.catch(() => undefined);
-    await relay.close();
-    await new Promise<void>((r) => {
-      localApp.close(() => {
-        r();
-      });
-    });
+    await fixture.close();
+    await localApp.close();
   }, 10_000);
 });

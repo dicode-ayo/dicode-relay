@@ -71,6 +71,16 @@ const TlsSchema = z.object({
   key_file: z.string().default(""),
 });
 
+// The dedicated daemon control-channel listener. Always TLS (mTLS: client
+// certificates are requested and carry the daemon identity). cert_file /
+// key_file empty → fall back to server.tls.*; if that is also empty, a
+// self-signed dev cert is auto-provisioned (see start.ts).
+const MtlsSchema = z.object({
+  port: z.number().int().default(5554),
+  cert_file: z.string().default(""),
+  key_file: z.string().default(""),
+});
+
 const ServerSchema = z
   .object({
     port: z.number().int().default(5553),
@@ -98,6 +108,7 @@ const ServerSchema = z
       .nullish()
       .transform((v) => v ?? undefined),
     tls: TlsSchema.default(() => TlsSchema.parse({})),
+    mtls: MtlsSchema.default(() => MtlsSchema.parse({})),
   })
   .transform((s) => ({
     ...s,
@@ -132,11 +143,11 @@ const StatusSchema = z.object({
 });
 
 const RelaySchema = z.object({
+  // Clock-skew tolerance for the broker /auth request freshness check.
   timestamp_tolerance_s: z.number().int().default(30),
   ping_interval_ms: z.number().int().default(30_000),
   pong_timeout_ms: z.number().int().default(10_000),
   request_timeout_ms: z.number().int().default(30_000),
-  nonce_ttl_ms: z.number().int().default(60_000),
 });
 
 const BrokerSchema = z.object({
