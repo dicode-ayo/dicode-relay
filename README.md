@@ -178,6 +178,11 @@ Client → Server (response):
   }
 ```
 
+`path` is the origin-form request-target: the inbound query string (e.g.
+`/hooks/some-task?wait=false`) is carried verbatim, percent-encoding
+preserved. The daemon validates only the path component against its
+allow-list and re-attaches the query when calling the local daemon.
+
 ### OAuth token delivery
 
 When the broker completes a code exchange, it sends a `request` message to the daemon at path `/hooks/oauth-complete`:

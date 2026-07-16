@@ -89,6 +89,36 @@ describe("Relay forwarding", () => {
     ws.terminate();
   });
 
+  it("forward() carries a query-bearing path verbatim", async () => {
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
+
+    ws.on("message", (data: Buffer | string) => {
+      const req = parseRequest(data);
+      if (req === null) return;
+      ws.send(
+        responseEnvelope({
+          id: req.id,
+          status: 200,
+          body: Buffer.from(req.path).toString("base64"),
+        }),
+      );
+    });
+
+    const path = "/hooks/task?wait=false&name=a%20b%26c";
+    const result = await fixture.relay.forward(
+      daemon.identity.uuid,
+      "GET",
+      path,
+      {},
+      Buffer.alloc(0),
+    );
+
+    expect(Buffer.from(result.body, "base64").toString()).toBe(path);
+
+    ws.terminate();
+  });
+
   it("forward to unknown UUID throws ClientNotConnectedError", async () => {
     await expect(
       fixture.relay.forward("a".repeat(64), "GET", "/", {}, Buffer.alloc(0)),

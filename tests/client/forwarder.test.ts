@@ -145,6 +145,97 @@ describe("dispatchRequest", () => {
     expect(resp.status).toBe(403);
   });
 
+  it("forwards the raw query string verbatim to the local daemon", async () => {
+    const http = await import("node:http");
+    let receivedUrl: string | undefined;
+    const srv = http.createServer((reqIn, resOut) => {
+      receivedUrl = reqIn.url;
+      resOut.writeHead(200);
+      resOut.end("ok");
+    });
+    await new Promise<void>((r) => {
+      srv.listen(0, () => {
+        r();
+      });
+    });
+    const port = (srv.address() as { port: number }).port;
+
+    const resp = await dispatchRequest(buildReq({ path: "/hooks/task?wait=false&msg=a%20b%26c" }), {
+      localPort: port,
+      daemonUUID: "abc",
+    });
+    srv.close();
+
+    expect(resp.status).toBe(200);
+    expect(receivedUrl).toBe("/hooks/task?wait=false&msg=a%20b%26c");
+  });
+
+  it("forwards a query string on /dicode.js", async () => {
+    const http = await import("node:http");
+    let receivedUrl: string | undefined;
+    const srv = http.createServer((reqIn, resOut) => {
+      receivedUrl = reqIn.url;
+      resOut.writeHead(200);
+      resOut.end("ok");
+    });
+    await new Promise<void>((r) => {
+      srv.listen(0, () => {
+        r();
+      });
+    });
+    const port = (srv.address() as { port: number }).port;
+
+    const resp = await dispatchRequest(buildReq({ path: "/dicode.js?v=2" }), {
+      localPort: port,
+      daemonUUID: "abc",
+    });
+    srv.close();
+
+    expect(resp.status).toBe(200);
+    expect(receivedUrl).toBe("/dicode.js?v=2");
+  });
+
+  it("rejects path traversal with a query string attached", async () => {
+    const resp = await dispatchRequest(buildReq({ path: "/hooks/../admin?wait=false" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(403);
+  });
+
+  it("rejects percent-encoded traversal with a query string attached", async () => {
+    const resp = await dispatchRequest(buildReq({ path: "/hooks/%2e%2e/secret?x=1" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(403);
+  });
+
+  it("rejects malformed percent-encoding in the path even with a query", async () => {
+    const resp = await dispatchRequest(buildReq({ path: "/hooks/%ZZ?x=1" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(400);
+  });
+
+  it("does not decode the query — malformed percent-encoding there passes validation", async () => {
+    // Port 1 — connection refused, so 502 proves the allow-list check passed.
+    const resp = await dispatchRequest(buildReq({ path: "/hooks/x?bad=%ZZ" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(502);
+  });
+
+  it("rejects a query-only request-target", async () => {
+    const resp = await dispatchRequest(buildReq({ path: "?wait=false" }), {
+      localPort: 1,
+      daemonUUID: "abc",
+    });
+    expect(resp.status).toBe(403);
+  });
+
   // Fix 2: credential header stripping test
   it("strips Authorization, Cookie, X-Api-Key from forwarded requests", async () => {
     const http = await import("node:http");
