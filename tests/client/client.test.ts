@@ -344,6 +344,50 @@ describe("RelayClient end-to-end", () => {
     expect(errors.some((e) => e.includes("socket closed during handshake"))).toBe(true);
   }, 10_000);
 
+  it("refuses to connect when the broker's server cert is untrusted (no ca, non-WebPKI)", async () => {
+    // The daemon must never trust a self-signed broker without an explicit
+    // ca — otherwise the welcome/broker_pubkey it persists would come from
+    // an unauthenticated channel. Omitting `ca` leaves the https.Agent at
+    // rejectUnauthorized: true, so the self-signed broker cert fails
+    // verification and the connection never establishes.
+    const fixture = await startMtlsRelay({ baseUrl: "ws://127.0.0.1" });
+    const daemon = await testDaemon(fixture);
+
+    let brokerKeySeen = false;
+    const errors: string[] = [];
+    const ac = new AbortController();
+    const client = new RelayClient({
+      serverURL: fixture.url,
+      localPort: 1,
+      identity: daemon.identity,
+      // Deliberately omit ca — the broker cert is self-signed and not WebPKI.
+      tls: { certPem: daemon.cert.certPem, keyPem: daemon.cert.keyPem },
+      onBrokerPubkey: () => {
+        brokerKeySeen = true;
+        return Promise.resolve();
+      },
+      log: silentLogger(),
+      onStatus: (s) => {
+        if (s.last_error !== undefined) errors.push(s.last_error);
+      },
+    });
+    const runPromise = client.run(ac.signal);
+
+    await new Promise((r) => setTimeout(r, 600));
+    ac.abort();
+    await Promise.race([
+      runPromise.catch(() => undefined),
+      new Promise((r) => setTimeout(r, 3_000)),
+    ]);
+    await fixture.close();
+
+    // Never registered on the broker, never surfaced a broker key, and did
+    // report connection errors.
+    expect(fixture.relay.hasClient(daemon.identity.uuid)).toBe(false);
+    expect(brokerKeySeen).toBe(false);
+    expect(errors.length).toBeGreaterThan(0);
+  }, 10_000);
+
   it("dial timeout aborts cleanly and backs off — no unhandled 'error' crash", async () => {
     // A TCP server that accepts the connection but never completes the TLS
     // handshake, so the dial hangs until dialTimeoutMs fires. terminate() on a
