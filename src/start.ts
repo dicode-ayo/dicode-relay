@@ -40,7 +40,8 @@ import {
   type ProviderConfig,
   type PublicProviderInfo,
 } from "./broker/providers.js";
-import { SessionStore } from "./broker/sessions.js";
+import { SeenSet } from "./broker/sessions.js";
+import { buildFlowSession } from "./broker/flow-session.js";
 import { loadBrokerSigningKey } from "./shared/signing.js";
 import { MetricsCollector } from "./status/metrics.js";
 import { statusAuth } from "./status/auth.js";
@@ -178,7 +179,19 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   // -------------------------------------------------------------------------
 
   const realProviders = buildProviderMap(config);
-  const sessions = new SessionStore(brokerCfg.session_ttl_ms);
+  const seen = new SeenSet(brokerCfg.session_ttl_ms);
+
+  // Browser-facing OAuth flow cookie. Mounted before Grant and the broker/mock
+  // routers so `req.session` is available to all of them. Grant requires it for
+  // its own per-flow state; the broker seals its flow state into the same
+  // cookie. `secure` follows the public base URL's scheme.
+  const flowCookieSecure = /^(https|wss):/i.test(serverCfg.base_url);
+  app.use(
+    buildFlowSession(brokerKey, {
+      secure: flowCookieSecure,
+      maxAgeMs: brokerCfg.session_ttl_ms,
+    }),
+  );
 
   // If the E2E mock flag is set, include "mock" so /auth/mock is accepted.
   // Grant must NOT receive the mock entry — /connect/mock is handled by the
@@ -197,7 +210,7 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
       "broker: DICODE_E2E_MOCK_PROVIDER enabled — mock provider registered. DO NOT USE IN PRODUCTION.",
     );
     // Mount before Grant so /connect/mock is intercepted first.
-    app.use(buildE2EMockRouter(relayServer, sessions, brokerKey));
+    app.use(buildE2EMockRouter(relayServer, brokerKey));
   }
 
   const grantMiddleware = buildGrantMiddleware(realProviders, serverCfg.base_url);
@@ -205,7 +218,7 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
   app.use(
     buildBrokerRouter(
       relayServer,
-      sessions,
+      seen,
       brokerProviders,
       relayCfg.timestamp_tolerance_s,
       brokerKey,

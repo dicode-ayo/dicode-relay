@@ -25,6 +25,7 @@ import {
   createSign,
   createVerify,
   generateKeyPairSync,
+  hkdfSync,
 } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -37,7 +38,25 @@ export interface BrokerSigningKey {
   sign: (data: Buffer) => string;
   /** Base64-encoded SPKI DER public key (for the welcome message) */
   publicKeyBase64: string;
+  /**
+   * 32-byte AES-256 key for sealing the stateless OAuth flow-state token
+   * (see broker/flow-state.ts). Derived deterministically from the private
+   * key so every relay instance behind a load balancer derives the same key
+   * and can open a token sealed by any other instance.
+   */
+  flowStateKey: Buffer;
+  /**
+   * cookie-session signing keys for the browser-facing OAuth flow cookie
+   * (the Grant leg's `req.session`). Derived from the same private key so the
+   * cookie a daemon's browser picks up on instance A verifies on instance B.
+   */
+  cookieKeys: string[];
 }
+
+/** HKDF domain label for the AES key that seals the flow-state token. */
+const FLOW_STATE_KEY_LABEL = "dicode/oauth-flow-state/v1";
+/** HKDF domain label for the cookie-session signing key. */
+const FLOW_COOKIE_KEY_LABEL = "dicode/oauth-flow-cookie/v1";
 
 /**
  * Load or generate the broker's signing key.
@@ -134,6 +153,18 @@ export function loadBrokerSigningKey(
   const publicKeyDer = publicKey.export({ type: "spki", format: "der" });
   const publicKeyBase64 = publicKeyDer.toString("base64");
 
+  // Derive the symmetric flow-state / cookie keys from the private key bytes.
+  // HKDF with distinct info labels keeps the two purposes independent while
+  // remaining deterministic across every instance that loads the same key.
+  const privDer = privateKey.export({ type: "pkcs8", format: "der" });
+  const emptySalt = Buffer.alloc(0);
+  const flowStateKey = Buffer.from(
+    hkdfSync("sha256", privDer, emptySalt, FLOW_STATE_KEY_LABEL, 32),
+  );
+  const cookieKey = Buffer.from(
+    hkdfSync("sha256", privDer, emptySalt, FLOW_COOKIE_KEY_LABEL, 32),
+  ).toString("base64url");
+
   return {
     sign(data: Buffer): string {
       const signer = createSign("SHA256");
@@ -141,6 +172,8 @@ export function loadBrokerSigningKey(
       return signer.sign(privateKey, "base64");
     },
     publicKeyBase64,
+    flowStateKey,
+    cookieKeys: [cookieKey],
   };
 }
 

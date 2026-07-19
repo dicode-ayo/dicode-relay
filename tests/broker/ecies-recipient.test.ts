@@ -11,12 +11,16 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildBrokerRouter } from "../../src/broker/router.js";
 import type { ProviderConfig } from "../../src/broker/providers.js";
-import { SessionStore } from "../../src/broker/sessions.js";
+import { SeenSet } from "../../src/broker/sessions.js";
+import type { BrokerSigningKey } from "../../src/shared/signing.js";
 import {
   startMtlsRelay,
   testDaemon,
   connectDaemon,
   testSessionTtlMs,
+  testBrokerKey,
+  mountFlowSession,
+  decodeFlowCookie,
   type MtlsRelayFixture,
   type TestDaemon,
 } from "../helpers.js";
@@ -53,14 +57,17 @@ describe("Broker ECIES recipient selection", () => {
   let fixture: MtlsRelayFixture;
   let httpServer: Server;
   let httpPort: number;
-  let sessions: SessionStore;
+  let seen: SeenSet;
+  let brokerKey: BrokerSigningKey;
 
   beforeEach(async () => {
     fixture = await startMtlsRelay({ baseUrl: "wss://relay.dicode.app" });
-    sessions = new SessionStore(testSessionTtlMs);
+    seen = new SeenSet(testSessionTtlMs);
+    brokerKey = testBrokerKey();
 
     const app = express();
-    app.use(buildBrokerRouter(fixture.relay, sessions, testProviders()));
+    mountFlowSession(app, brokerKey);
+    app.use(buildBrokerRouter(fixture.relay, seen, testProviders(), 30, brokerKey));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -84,10 +91,10 @@ describe("Broker ECIES recipient selection", () => {
       });
     });
     await fixture.close();
-    sessions.clear();
+    seen.clear();
   });
 
-  it("session.pubkey = decryptPubkey, distinct from sign pubkey", async () => {
+  it("sealed flow pubkey = decryptPubkey, distinct from sign pubkey", async () => {
     const daemon = await testDaemon(fixture);
     const { ws } = await connectDaemon(fixture, daemon);
 
@@ -98,10 +105,10 @@ describe("Broker ECIES recipient selection", () => {
     const decryptPubkey = Buffer.from(daemon.identity.decryptPubkeyB64, "base64");
     const signPubkey = Buffer.from(daemon.identity.signPubkeyB64, "base64");
 
-    const stored = sessions.get(sessionId);
-    expect(stored).toBeDefined();
-    expect(stored?.pubkey.equals(decryptPubkey)).toBe(true);
-    expect(stored?.pubkey.equals(signPubkey)).toBe(false);
+    const flow = decodeFlowCookie(response, brokerKey);
+    expect(flow).not.toBeNull();
+    expect(flow?.pubkey.equals(decryptPubkey)).toBe(true);
+    expect(flow?.pubkey.equals(signPubkey)).toBe(false);
 
     ws.terminate();
   });

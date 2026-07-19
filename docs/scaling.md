@@ -14,9 +14,16 @@ dicode-relay runs as a single Node.js process. All state is held in-memory:
 |---|---|---|
 | `clients` | `Map<uuid, ConnectedClient>` | Daemon WebSocket registry |
 | `pending` | `Map<id, PendingRequest>` | In-flight request/response correlation |
-| `SessionStore` | `Map<sessionId, Session>` | OAuth broker sessions (5 min TTL) |
+| `SeenSet` | `LRUCache<sessionId, true>` | OAuth single-use guard, per instance (5 min TTL) |
 | `NonceStore` | `Map<nonce, {expiresAt, timer}>` | Replay prevention (60 s TTL) |
 | Metrics | Per-client rolling buckets | Optional status page data |
+
+The OAuth browser-flow state itself is **not** held in-process — it is sealed
+into a signed flow cookie keyed off the shared broker signing key, so the
+callback survives a load balancer without a shared store or session affinity.
+Only the single-use `SeenSet` is instance-local; a session id consumed on
+instance A can be replayed against instance B within the short flow TTL, an
+accepted bound.
 
 ### Per-connection memory footprint
 
@@ -86,7 +93,7 @@ at instance B, the request cannot be forwarded.
 |---|---|
 | `clients` Map | Daemon connects to instance A; HTTP request hits instance B — UUID not found, forward fails |
 | `pending` Map | Request/response correlation is local to the instance holding the WebSocket |
-| `SessionStore` | OAuth session created on instance A; callback hits instance B — session not found |
+| `SeenSet` | OAuth single-use is per instance; a session id can be replayed across instances within the flow TTL (bounded, accepted). The flow state itself is cookie-borne, so callbacks already survive any instance |
 | `NonceStore` | Nonce checked only on the local instance — replay possible across instances |
 | Metrics | Each instance has a partial view |
 
@@ -158,11 +165,13 @@ backend relay_workers
 
 #### OAuth route handling
 
-OAuth endpoints (`/oauth/start`, `/oauth/callback`) do not include a daemon
-UUID in the path. Two options:
-
-- **Simple**: Route all `/oauth/*` traffic to a dedicated worker (e.g., worker 1).
-- **Clean**: Move `SessionStore` to Redis. The store is already a Map with TTLs — Redis with key expiry is a natural fit (~20 lines of change).
+OAuth endpoints (`/auth/*`, `/callback/*`) do not include a daemon UUID in the
+path, but they no longer need pinning: the flow state rides in a signed cookie
+keyed off the shared broker signing key, so any worker can serve the callback.
+Give every worker the same `broker.signing_key_file`. The only remaining
+instance-local OAuth state is the single-use `SeenSet` (cross-instance replay
+bounded by the flow TTL); move it to Redis (`SET NX` + TTL) if strict
+single-use across instances is required.
 
 #### Code changes required
 
@@ -187,7 +196,7 @@ For true multi-machine horizontal scaling, extract in-process state to Redis:
 | Component | Redis replacement |
 |---|---|
 | `clients` Map | Redis hash: `relay:clients` → `{uuid: instanceId}` — connection registry with pub/sub for cross-instance forwarding |
-| `SessionStore` | Redis `SET` with TTL — natural fit, already has expiry semantics |
+| `SeenSet` | Redis `SET` with NX + TTL — atomic check-and-insert for strict cross-instance OAuth single-use |
 | `NonceStore` | Redis `SET` with NX + TTL — atomic check-and-insert, perfect for replay prevention |
 | `pending` Map | Redis Streams or pub/sub — instance A publishes request, instance B (holding the WebSocket) subscribes and forwards |
 

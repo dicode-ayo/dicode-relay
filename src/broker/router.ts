@@ -16,9 +16,14 @@ import { v4 as uuidv4 } from "uuid";
 import type { RelayServer } from "../relay/server.js";
 import { buildSignedPayload, eciesEncrypt, verifyECDSA } from "../shared/crypto.js";
 import type { ProviderConfig } from "./providers.js";
-import type { SessionStore } from "./sessions.js";
+import type { Session, SeenSet } from "./sessions.js";
+import { openFlowState, sealFlowState } from "./flow-state.js";
+import { clearBrokerFlow, readBrokerFlow, writeBrokerFlow } from "./flow-session.js";
 import type { OAuthTokenDeliveryPayload } from "../shared/protocol.js";
 import { buildDeliverySignaturePayload, type BrokerSigningKey } from "../shared/signing.js";
+
+/** Lifetime of a browser OAuth flow — the user must complete consent within it. */
+const FLOW_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Fields that may be forwarded from an OAuth callback into the encrypted
@@ -61,18 +66,22 @@ export function filterCallbackTokenFields(
  * Build the Express router for the OAuth broker.
  *
  * @param relay               RelayServer instance
- * @param sessions            SessionStore instance
+ * @param seen                Per-instance single-use guard for session ids
  * @param providers           Enabled provider map (from config, already resolved)
  * @param timestampToleranceS Max clock skew in seconds (from config.relay.timestamp_tolerance_s)
- * @param brokerKey           Broker's signing key (signs delivery envelopes for authenticity)
+ * @param brokerKey           Broker's signing key — seals the flow-state cookie
+ *                            and signs delivery envelopes for authenticity
  */
 export function buildBrokerRouter(
   relay: RelayServer,
-  sessions: SessionStore,
+  seen: SeenSet,
   providers: ReadonlyMap<string, ProviderConfig>,
   timestampToleranceS = 30,
   brokerKey?: BrokerSigningKey,
 ): Router {
+  if (brokerKey === undefined) {
+    throw new Error("buildBrokerRouter: brokerKey is required to seal OAuth flow state");
+  }
   const router = Router();
 
   // -------------------------------------------------------------------------
@@ -165,18 +174,21 @@ export function buildBrokerRouter(
       return;
     }
 
-    // Store session. session.pubkey is the ECIES recipient (daemon's decrypt
-    // pubkey from hello). ECDSA verification above uses client.pubkey (the
+    // Seal the flow state into the browser's OAuth cookie instead of an
+    // in-process store, so the callback can land on any instance behind a
+    // load balancer. `flow.pubkey` is the ECIES recipient (daemon's decrypt
+    // pubkey from hello); ECDSA verification above uses client.pubkey (the
     // sign key).
-    sessions.set({
+    const flow: Session = {
       sessionId: session,
       relayUuid: relay_uuid,
       pubkey: client.decryptPubkey,
       pkceChallenge: challenge,
       provider,
-      expiresAt: Date.now() + 5 * 60 * 1000,
+      expiresAt: Date.now() + FLOW_TTL_MS,
       ...(scope !== undefined && scope !== "" ? { scope } : {}),
-    });
+    };
+    writeBrokerFlow(req.session, sealFlowState(brokerKey.flowStateKey, flow));
 
     // Redirect to Grant's connect route (relative redirect).
     // Grant dynamic fields: scope and state are passed as query params.
@@ -198,7 +210,7 @@ export function buildBrokerRouter(
 
   router.get("/callback/:provider", (req: Request, res: Response): void => {
     // Grant (transport: 'querystring') redirects here with token as query params.
-    void handleCallback(req, res, relay, sessions, brokerKey);
+    void handleCallback(req, res, relay, seen, brokerKey);
   });
 
   return router;
@@ -208,8 +220,8 @@ async function handleCallback(
   req: Request,
   res: Response,
   relay: RelayServer,
-  sessions: SessionStore,
-  brokerKey?: BrokerSigningKey,
+  seen: SeenSet,
+  brokerKey: BrokerSigningKey,
 ): Promise<void> {
   const rawQuery = req.query as Record<string, string | string[] | undefined>;
   const state = Array.isArray(rawQuery.state) ? rawQuery.state[0] : rawQuery.state;
@@ -228,11 +240,37 @@ async function handleCallback(
     return;
   }
 
-  const session = sessions.get(state);
-  if (session === undefined) {
+  // Recover the flow state from the sealed cookie (stateless — no shared store).
+  const token = readBrokerFlow(req.session);
+  const session = token !== undefined ? openFlowState(brokerKey.flowStateKey, token) : null;
+  if (session === null) {
     res.status(400).send("<html><body><p>Session expired or not found</p></body></html>");
     return;
   }
+
+  // Bind the cookie to the OAuth `state` Grant round-trips (= our session id).
+  // Grant already rejects a provider state mismatch; this rejects a cookie
+  // that belongs to a different flow than the one the provider redirected for.
+  if (session.sessionId !== state) {
+    clearBrokerFlow(req.session);
+    res.status(400).send("<html><body><p>Session mismatch</p></body></html>");
+    return;
+  }
+
+  if (session.expiresAt <= Date.now()) {
+    clearBrokerFlow(req.session);
+    res.status(400).send("<html><body><p>Session expired or not found</p></body></html>");
+    return;
+  }
+
+  // Single-use, best-effort per instance. Cross-instance replay is bounded by
+  // the flow TTL (accepted trade-off of the stateless design).
+  if (!seen.add(session.sessionId)) {
+    clearBrokerFlow(req.session);
+    res.status(400).send("<html><body><p>Session already used</p></body></html>");
+    return;
+  }
+  clearBrokerFlow(req.session);
 
   // Allowlist known OAuth response fields — the callback URL is attacker-
   // reachable, so unknown params must be dropped before encryption.
@@ -260,19 +298,14 @@ async function handleCallback(
 
   // Sign the envelope so the daemon can verify it was assembled by this
   // broker, not by a forger who merely knows the daemon's public key.
-  if (brokerKey !== undefined) {
-    const sigPayload = buildDeliverySignaturePayload(
-      deliveryPayload.type,
-      deliveryPayload.session_id,
-      deliveryPayload.ephemeral_pubkey,
-      deliveryPayload.ciphertext,
-      deliveryPayload.nonce,
-    );
-    deliveryPayload.broker_sig = brokerKey.sign(sigPayload);
-  }
-
-  // Delete session immediately (single-use)
-  sessions.delete(session.sessionId);
+  const sigPayload = buildDeliverySignaturePayload(
+    deliveryPayload.type,
+    deliveryPayload.session_id,
+    deliveryPayload.ephemeral_pubkey,
+    deliveryPayload.ciphertext,
+    deliveryPayload.nonce,
+  );
+  deliveryPayload.broker_sig = brokerKey.sign(sigPayload);
 
   // Forward to daemon via relay
   const requestId = uuidv4();

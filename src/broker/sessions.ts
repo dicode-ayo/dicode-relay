@@ -1,11 +1,12 @@
 /**
- * SessionStore — in-memory store for OAuth broker sessions.
- * Each session is created when the daemon initiates an OAuth flow and is
- * deleted immediately after the token is delivered.
+ * OAuth broker flow-state types and single-use guard.
  *
- * TTL: configurable per instance (5 minutes in production). Sessions that
- * have not been completed by then are purged. Storage is an `lru-cache` with
- * a hard max of 10_000 entries to bound memory against abusive traffic.
+ * The flow payload is no longer held in a shared in-process map — it is sealed
+ * into a browser cookie so the flow survives a load balancer (see
+ * `broker/flow-state.ts`). What remains here is the `Session` payload shape and
+ * `SeenSet`, a per-instance LRU that enforces single-use best-effort: a session
+ * id consumed on one instance cannot be replayed against that same instance.
+ * Cross-instance replay is bounded by the short flow TTL and accepted.
  */
 
 import { LRUCache } from "lru-cache";
@@ -15,7 +16,7 @@ export interface Session {
   sessionId: string;
   /** UUID (64 hex chars) of the connected daemon */
   relayUuid: string;
-  /** 65-byte uncompressed P-256 public key of the daemon */
+  /** 65-byte uncompressed P-256 public key of the daemon (ECIES recipient) */
   pubkey: Buffer;
   /** base64url-encoded PKCE challenge */
   pkceChallenge: string;
@@ -27,8 +28,8 @@ export interface Session {
   scope?: string | undefined;
 }
 
-/** Hard ceiling on concurrent in-flight OAuth sessions. */
-const MAX_SESSIONS = 10_000;
+/** Hard ceiling on tracked session ids. */
+const MAX_SEEN = 10_000;
 
 /**
  * Monotonic-ish clock used by LRUCache for TTL bookkeeping. We route
@@ -46,56 +47,49 @@ const dateClock = {
 // `perf` is accepted by the LRUCache constructor but not exposed in the
 // public type definitions, so we pass the options as a partial record and
 // let LRUCache consume the runtime property.
-type LruOpts = LRUCache.Options<string, Session, unknown> & {
+type LruOpts = LRUCache.Options<string, true, unknown> & {
   perf?: { now(): number };
 };
 
-export class SessionStore {
-  private readonly cache: LRUCache<string, Session>;
+/**
+ * Per-instance single-use guard for OAuth session ids. Bounded LRU with a TTL
+ * matching the flow lifetime, so a consumed id is remembered just long enough
+ * to reject a replay within the window where the sealed token is still valid.
+ */
+export class SeenSet {
+  private readonly cache: LRUCache<string, true>;
 
   constructor(ttlMs: number) {
     const opts: LruOpts = {
-      max: MAX_SESSIONS,
+      max: MAX_SEEN,
       ttl: ttlMs,
-      // Schedule a setTimeout per entry so expired sessions are dropped
-      // eagerly (preserves prior Map+setTimeout behavior: `size` drops to 0
-      // at TTL without needing a subsequent `get`).
       ttlAutopurge: true,
       perf: dateClock,
     };
-    this.cache = new LRUCache<string, Session>(opts);
+    this.cache = new LRUCache<string, true>(opts);
   }
 
   /**
-   * Store a new session. Replaces any existing session with the same ID
-   * (and resets its TTL). Automatically expires after the configured TTL.
+   * Record `id` as consumed. Returns true if it was newly recorded, false if
+   * `id` was already present (i.e. this is a replay).
    */
-  set(session: Session): void {
-    this.cache.set(session.sessionId, session);
+  add(id: string): boolean {
+    if (this.cache.has(id)) return false;
+    this.cache.set(id, true);
+    return true;
   }
 
-  /**
-   * Retrieve a session by ID.
-   * Returns undefined if not found or expired.
-   */
-  get(sessionId: string): Session | undefined {
-    return this.cache.get(sessionId);
+  /** Whether `id` has been recorded (and not yet expired). */
+  has(id: string): boolean {
+    return this.cache.has(id);
   }
 
-  /**
-   * Delete a session by ID (e.g., after successful token delivery).
-   * Idempotent — does nothing if not found.
-   */
-  delete(sessionId: string): void {
-    this.cache.delete(sessionId);
-  }
-
-  /** Number of active sessions (for testing / observability). */
+  /** Number of tracked ids (for testing / observability). */
   get size(): number {
     return this.cache.size;
   }
 
-  /** Clear all sessions (for testing). */
+  /** Clear all tracked ids (for testing). */
   clear(): void {
     this.cache.clear();
   }

@@ -8,16 +8,106 @@
  */
 
 import { createServer as createHttpsServer, Agent as HttpsAgent, type Server } from "node:https";
+import { generateKeyPairSync } from "node:crypto";
+import type { AddressInfo } from "node:net";
+import express, { type Express } from "express";
 import WebSocket from "ws";
 import { defaultConfig } from "../src/config.js";
 import { RelayServer, type RelayServerOptions } from "../src/relay/server.js";
 import { generateSelfSignedServerCert, type GeneratedCert } from "../src/shared/certs.js";
 import { Identity } from "../src/client/identity.js";
+import { loadBrokerSigningKey, type BrokerSigningKey } from "../src/shared/signing.js";
+import { buildFlowSession, writeBrokerFlow, FLOW_COOKIE_NAME } from "../src/broker/flow-session.js";
+import { openFlowState, sealFlowState } from "../src/broker/flow-state.js";
+import type { Session } from "../src/broker/sessions.js";
 
 const cfg = defaultConfig();
 
 /** Session TTL from Zod defaults. */
 export const testSessionTtlMs = cfg.broker.session_ttl_ms;
+
+// ---------------------------------------------------------------------------
+// OAuth flow cookie helpers
+// ---------------------------------------------------------------------------
+
+/** A broker signing key backed by a fresh inline PEM (never touches disk). */
+export function testBrokerKey(): BrokerSigningKey {
+  const pair = generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  return loadBrokerSigningKey({ BROKER_SIGNING_KEY: pair.privateKey }, "/tmp");
+}
+
+/** Mount the OAuth flow cookie (cookie-session) on a test app (secure off). */
+export function mountFlowSession(app: Express, brokerKey: BrokerSigningKey): void {
+  app.use(buildFlowSession(brokerKey, { secure: false, maxAgeMs: testSessionTtlMs }));
+}
+
+/** Collapse a response's Set-Cookie headers into a request Cookie header. */
+export function cookiesFrom(res: Response): string {
+  return res.headers
+    .getSetCookie()
+    .map((c) => c.split(";")[0])
+    .join("; ");
+}
+
+/**
+ * Decode the sealed flow-state from a response's Set-Cookie headers. Returns
+ * the `Session` the broker sealed into the flow cookie, or null if absent.
+ */
+export function decodeFlowCookie(res: Response, brokerKey: BrokerSigningKey): Session | null {
+  const prefix = `${FLOW_COOKIE_NAME}=`;
+  const main = res.headers.getSetCookie().find((c) => c.startsWith(prefix));
+  if (main === undefined) return null;
+  const value = decodeURIComponent(main.slice(prefix.length).split(";")[0] ?? "");
+  let token: unknown;
+  try {
+    const obj = JSON.parse(Buffer.from(value, "base64").toString("utf8")) as Record<
+      string,
+      unknown
+    >;
+    token = obj.broker;
+  } catch {
+    return null;
+  }
+  if (typeof token !== "string") return null;
+  return openFlowState(brokerKey.flowStateKey, token);
+}
+
+/**
+ * Produce a Cookie header carrying a sealed flow-state for `session`, using the
+ * real cookie-session middleware so the signature is valid. Lets a test present
+ * a flow cookie to /callback or /connect/mock without driving the full /auth leg.
+ */
+export async function flowCookieHeader(
+  brokerKey: BrokerSigningKey,
+  session: Session,
+): Promise<string> {
+  const app = express();
+  mountFlowSession(app, brokerKey);
+  app.get("/seed", (req, res) => {
+    writeBrokerFlow(req.session, sealFlowState(brokerKey.flowStateKey, session));
+    res.end();
+  });
+  const server = app.listen(0);
+  await new Promise<void>((resolve) => {
+    server.once("listening", () => {
+      resolve();
+    });
+  });
+  const port = (server.address() as AddressInfo).port;
+  const res = await fetch(`http://localhost:${port.toString()}/seed`);
+  await res.text();
+  const cookie = cookiesFrom(res);
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
+  return cookie;
+}
 
 // ---------------------------------------------------------------------------
 // mTLS relay fixture
