@@ -124,7 +124,7 @@ export async function testDaemon(fixture: Pick<MtlsRelayFixture, "ca">): Promise
  * resolve with the open socket once the welcome frame arrives.
  */
 export async function connectDaemon(
-  fixture: MtlsRelayFixture,
+  fixture: Pick<MtlsRelayFixture, "url">,
   daemon: TestDaemon,
 ): Promise<{ ws: WebSocket; welcome: Record<string, unknown> }> {
   const ws = new WebSocket(fixture.url, { agent: daemon.agent });

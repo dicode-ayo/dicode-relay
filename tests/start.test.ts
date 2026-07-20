@@ -16,7 +16,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ZodError } from "zod";
 import { startServer } from "../src/start.js";
-import { testServerCert } from "./helpers.js";
+import {
+  connectDaemon,
+  parseRequest,
+  responseEnvelope,
+  testDaemon,
+  testServerCert,
+} from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -415,5 +421,71 @@ broker:
     // proves the sockets were released cleanly.
     await assertPortFree(port);
     await assertPortFree(mtlsPort);
+  });
+
+  it("forwards the raw query string on /u/:uuid/hooks/* and /u/:uuid/dicode.js", async () => {
+    const port = await pickPort();
+    const mtlsPort = await pickPort();
+    const serverCert = await testServerCert();
+    const mtlsCertPath = join(ctx.dir, "mtls-cert.pem");
+    const mtlsKeyPath = join(ctx.dir, "mtls-key.pem");
+    writeFileSync(mtlsCertPath, serverCert.certPem);
+    writeFileSync(mtlsKeyPath, serverCert.keyPem, { mode: 0o600 });
+    writeYaml(
+      ctx,
+      `
+server:
+  port: ${String(port)}
+  base_url: http://localhost:${String(port)}
+  mtls:
+    port: ${String(mtlsPort)}
+    cert_file: ${mtlsCertPath}
+    key_file: ${mtlsKeyPath}
+broker:
+  signing_key_file: ${ctx.signingKeyPath}
+`,
+    );
+
+    const handle = await startServer({
+      configPath: ctx.configPath,
+      env: { ...process.env },
+    });
+
+    try {
+      const daemon = await testDaemon({ ca: serverCert.certPem });
+      const { ws } = await connectDaemon({ url: `wss://127.0.0.1:${String(mtlsPort)}` }, daemon);
+
+      // Echo the forwarded path back as the response body.
+      ws.on("message", (data: Buffer | string) => {
+        const req = parseRequest(data);
+        if (req === null) return;
+        ws.send(
+          responseEnvelope({
+            id: req.id,
+            status: 200,
+            body: Buffer.from(req.path).toString("base64"),
+          }),
+        );
+      });
+
+      const withQuery = await httpGetBody(
+        port,
+        `/u/${daemon.identity.uuid}/hooks/task?wait=false&name=a%20b%26c`,
+      );
+      expect(withQuery.status).toBe(200);
+      expect(withQuery.body).toBe("/hooks/task?wait=false&name=a%20b%26c");
+
+      const noQuery = await httpGetBody(port, `/u/${daemon.identity.uuid}/hooks/task`);
+      expect(noQuery.status).toBe(200);
+      expect(noQuery.body).toBe("/hooks/task");
+
+      const sdk = await httpGetBody(port, `/u/${daemon.identity.uuid}/dicode.js?v=2`);
+      expect(sdk.status).toBe(200);
+      expect(sdk.body).toBe("/dicode.js?v=2");
+
+      ws.terminate();
+    } finally {
+      await handle.close();
+    }
   });
 });

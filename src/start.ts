@@ -257,9 +257,18 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
       });
   }
 
+  // Raw query string (leading "?" included) exactly as received. Taken from
+  // originalUrl rather than req.query so percent-encoding survives verbatim —
+  // a parse/re-serialize round-trip would mangle encoded values. The daemon
+  // splits it off again before its path allow-list check.
+  function rawQuery(req: express.Request): string {
+    const i = req.originalUrl.indexOf("?");
+    return i === -1 ? "" : req.originalUrl.slice(i);
+  }
+
   // /u/:uuid/dicode.js — client SDK served by the daemon
   app.get("/u/:uuid/dicode.js", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
-    forwardToClient(req, res, req.params.uuid, "/dicode.js");
+    forwardToClient(req, res, req.params.uuid, "/dicode.js" + rawQuery(req));
   });
 
   // /u/:uuid/hooks/* — webhook requests forwarded to daemon
@@ -267,7 +276,7 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
     const uuid = req.params.uuid;
     const pathParam = req.params.path;
     const pathStr = Array.isArray(pathParam) ? pathParam.join("/") : pathParam;
-    const hookPath = "/hooks/" + pathStr;
+    const hookPath = "/hooks/" + pathStr + rawQuery(req);
 
     forwardToClient(req, res, uuid, hookPath);
   });

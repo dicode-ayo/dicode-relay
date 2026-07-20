@@ -31,18 +31,25 @@ export async function dispatchRequest(
   req: RequestMessage,
   ctx: ForwardCtx,
 ): Promise<ResponseMessage> {
+  // req.path is an origin-form request-target: split the raw query off before
+  // the allow-list checks (only the path component is validated) and re-attach
+  // it verbatim on fetch so percent-encoded values survive without a
+  // decode/re-encode round-trip.
+  const queryIdx = req.path.indexOf("?");
+  const barePath = queryIdx === -1 ? req.path : req.path.slice(0, queryIdx);
+
   // Normalise the path before allow-list checks to prevent path-traversal
   // bypasses via ".." segments or percent-encoded variants.
   let decoded: string;
   try {
-    decoded = decodeURIComponent(req.path);
+    decoded = decodeURIComponent(barePath);
   } catch {
     return errorResponse(req.id, 400);
   }
   const normalised = posix.normalize(decoded);
   // If normalisation changed anything (e.g. ".." collapsed, "//" folded, or
   // the raw path contained percent-encoded sequences) — reject.
-  if (normalised !== decoded || normalised !== req.path) {
+  if (normalised !== decoded || normalised !== barePath) {
     return errorResponse(req.id, 403);
   }
   if (!normalised.startsWith("/hooks/") && normalised !== "/dicode.js") {
