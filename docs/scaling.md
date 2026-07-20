@@ -99,6 +99,77 @@ at instance B, the request cannot be forwarded.
 
 ---
 
+## Shared instance identity (required before any multi-instance topology)
+
+Every scaling tier below runs more than one relay process. Two long-lived
+identity artifacts **auto-generate per working directory** and must be made
+identical across instances first, or the fleet is silently broken:
+
+| Artifact | Auto-generate fallback | Consumed by |
+|---|---|---|
+| Broker signing key (ECDSA P-256) | `<cwd>/broker-signing-key.pem` | Its pubkey rides in every `welcome`; daemons verify the `broker_sig` on token delivery against it |
+| mTLS server cert | `<cwd>/relay-mtls-cert.pem` / `-key.pem` | Daemons pin it via `relay.ca_file` on the control channel |
+
+If two instances each auto-generate, they diverge: a token delivery signed by
+instance B fails `broker_sig` verification against the welcome pubkey a daemon
+received from instance A, and cert pinning fails against whichever instance did
+not mint the cert the daemon pinned.
+
+### The `server.multi_instance` fail-fast switch
+
+Set `server.multi_instance: true` in `relay.yaml` on every instance. This flips
+both auto-generate fallbacks from "silently mint a per-instance key" to a hard
+startup error, so a misconfigured instance refuses to boot instead of joining
+the fleet with a divergent identity. In that mode you must supply, **identical
+on every instance**:
+
+- `broker.signing_key_file` (or the `BROKER_SIGNING_KEY_FILE` / `BROKER_SIGNING_KEY` env),
+- `server.mtls.cert_file` + `server.mtls.key_file` (or a shared `server.tls` cert, which the mTLS listener reuses).
+
+Leaving `multi_instance` at its default `false` keeps the single-instance
+convenience: material auto-generates on first start, and a prominent
+single-instance-only warning is logged each time it does.
+
+### Provisioning the shared material
+
+```sh
+# Broker signing key — one P-256 private key, shared by all instances.
+openssl ecparam -name prime256v1 -genkey -noout \
+  | openssl pkcs8 -topk8 -nocrypt -out broker-signing-key.pem
+chmod 600 broker-signing-key.pem
+
+# mTLS server cert — a cert whose SANs cover every instance hostname daemons
+# dial (e.g. a wildcard *.relay.dicode.io, or a SAN list of broker-0/1/2).
+# Any CA works; daemons pin the leaf/chain via relay.ca_file, they do not
+# validate a public trust root on the control channel.
+```
+
+Distribute both files to every instance through your secret manager (k8s
+Secret, Vault, baked image layer) and point each instance's config at them.
+The env forms exist so containers can mount the key without re-rendering
+`relay.yaml`.
+
+### Rotation
+
+Rotating either artifact changes the fleet's **trust anchor**, not the daemons'
+identities:
+
+- **Daemon uuids are unaffected.** A uuid derives from the *daemon's own*
+  client certificate (`socket.getPeerX509Certificate()`), never from the
+  broker's signing key or the relay's mTLS cert. Rotating relay-side material
+  does not renumber a single daemon.
+- **Broker signing key rotation** changes the pubkey announced in `welcome`.
+  Daemons pick up the new pubkey on their next (re)connect, so roll the new key
+  out to all instances together — during a mixed window, a daemon holding the
+  old welcome pubkey rejects deliveries signed by an already-rotated instance.
+  Simplest safe path: deploy the new key to every instance, then trigger a
+  daemon reconnect (rolling restart of the fleet drops sockets; daemons
+  reconnect and receive a fresh `welcome`).
+- **mTLS cert rotation** changes what daemons must pin via `relay.ca_file`.
+  Ship the new CA/cert to daemons *before* cutting instances over, or issue the
+  new cert from a CA the daemons already trust, so the pin still matches across
+  the swap.
+
 ## Scaling upgrade paths
 
 ### Tier 1: Reverse proxy with consistent hash routing (recommended first step)
@@ -168,10 +239,12 @@ backend relay_workers
 OAuth endpoints (`/auth/*`, `/callback/*`) do not include a daemon UUID in the
 path, but they no longer need pinning: the flow state rides in a signed cookie
 keyed off the shared broker signing key, so any worker can serve the callback.
-Give every worker the same `broker.signing_key_file`. The only remaining
-instance-local OAuth state is the single-use `SeenSet` (cross-instance replay
-bounded by the flow TTL); move it to Redis (`SET NX` + TTL) if strict
-single-use across instances is required.
+Give every worker the same shared identity material — see
+[Shared instance identity](#shared-instance-identity-required-before-any-multi-instance-topology)
+above; set `server.multi_instance: true` so a worker missing it fails fast. The
+only remaining instance-local OAuth state is the single-use `SeenSet`
+(cross-instance replay bounded by the flow TTL); move it to Redis (`SET NX` +
+TTL) if strict single-use across instances is required.
 
 #### Code changes required
 

@@ -31,6 +31,10 @@ describe("defaultConfig", () => {
     expect(cfg.server.mtls.cert_file).toBe("");
     expect(cfg.server.mtls.key_file).toBe("");
   });
+
+  it("defaults server.multi_instance to false (single-instance auto-generate)", () => {
+    expect(defaultConfig().server.multi_instance).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -88,6 +92,13 @@ broker:
 
     const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
     expect(cfg.broker.providers.github?.client_id).toBe("");
+  });
+
+  it("parses server.multi_instance: true from YAML", () => {
+    writeFileSync(tmpPath, "server:\n  multi_instance: true\n");
+
+    const cfg = loadConfig({ RELAY_CONFIG: tmpPath });
+    expect(cfg.server.multi_instance).toBe(true);
   });
 
   it("applies Zod defaults for missing sections", () => {

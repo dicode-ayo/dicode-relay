@@ -146,6 +146,84 @@ describe("loadBrokerSigningKey", () => {
     }
   });
 
+  it("throws (fail-fast) when requireSharedKey is set and no shared key source is present", () => {
+    // server.multi_instance mode: the legacy cwd-fallback would mint a
+    // per-instance key that diverges across the fleet. Reaching it must throw
+    // rather than auto-generate, so a misconfigured instance refuses to boot.
+    const baseTmp = mkdtempSync(join(tmpdir(), "dicode-relay-multi-"));
+    try {
+      expect(() =>
+        loadBrokerSigningKey(
+          { BROKER_SIGNING_KEY_FILE: "", BROKER_SIGNING_KEY: "" },
+          baseTmp,
+          "", // no YAML path
+          true, // allowAutoGenerate — must be overridden by requireSharedKey
+          true, // requireSharedKey
+        ),
+      ).toThrow(/server\.multi_instance is set but no shared broker signing key/);
+
+      // Fail-fast means nothing was written to the fallback path either.
+      expect(existsSync(join(baseTmp, "broker-signing-key.pem"))).toBe(false);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("throws under requireSharedKey even if a stale auto-generated key sits in cwd", () => {
+    // A previously auto-generated per-cwd key is just as divergent as a fresh
+    // one; multi_instance mode must not silently adopt it.
+    const baseTmp = mkdtempSync(join(tmpdir(), "dicode-relay-stale-"));
+    try {
+      const pair = generateKeyPairSync("ec", {
+        namedCurve: "prime256v1",
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+        publicKeyEncoding: { type: "spki", format: "pem" },
+      });
+      writeFileSync(join(baseTmp, "broker-signing-key.pem"), pair.privateKey, { mode: 0o600 });
+
+      expect(() =>
+        loadBrokerSigningKey(
+          { BROKER_SIGNING_KEY_FILE: "", BROKER_SIGNING_KEY: "" },
+          baseTmp,
+          "",
+          true,
+          true,
+        ),
+      ).toThrow(/server\.multi_instance is set but no shared broker signing key/);
+    } finally {
+      rmSync(baseTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("under requireSharedKey, a shared signing_key_file loads identically across instances", () => {
+    // The whole point of multi_instance: hand every instance the same file and
+    // they derive the same broker pubkey (and thus verify each other's
+    // deliveries). Model two instances loading the same file from different
+    // cwds and assert byte-identical pubkeys.
+    const pair = generateKeyPairSync("ec", {
+      namedCurve: "prime256v1",
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const sharedKeyPath = join(process.cwd(), "test-shared-multi-signing.pem");
+    writeFileSync(sharedKeyPath, pair.privateKey, { mode: 0o600 });
+    const cwdA = mkdtempSync(join(tmpdir(), "dicode-relay-inst-a-"));
+    const cwdB = mkdtempSync(join(tmpdir(), "dicode-relay-inst-b-"));
+    try {
+      const a = loadBrokerSigningKey({}, cwdA, sharedKeyPath, true, true);
+      const b = loadBrokerSigningKey({}, cwdB, sharedKeyPath, true, true);
+      expect(a.publicKeyBase64).toBe(b.publicKeyBase64);
+      // A delivery signed on instance A verifies against B's pubkey.
+      const payload = buildDeliverySignaturePayload("t", "s", "e", "c", "n");
+      const sig = a.sign(payload);
+      expect(verifyDeliverySignature(b.publicKeyBase64, sig, "t", "s", "e", "c", "n")).toBe(true);
+    } finally {
+      unlinkSync(sharedKeyPath);
+      rmSync(cwdA, { recursive: true, force: true });
+      rmSync(cwdB, { recursive: true, force: true });
+    }
+  });
+
   it("env BROKER_SIGNING_KEY_FILE takes precedence over YAML signing_key_file", () => {
     const envPair = generateKeyPairSync("ec", {
       namedCurve: "prime256v1",
