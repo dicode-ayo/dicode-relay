@@ -47,6 +47,21 @@ relay:
   pong_timeout_ms: 10000
   request_timeout_ms: 30000
 
+  # Availability guards on the webhook forward path (DoS/backpressure).
+  # Defaults carry generous headroom over any single daemon's realistic load,
+  # so a well-behaved daemon never trips them.
+  #
+  # Max outstanding forwards to one daemon before new inbound requests get 429
+  # (instead of growing the pending map without bound under a slow daemon).
+  max_pending_per_client: 256
+  # WS send-buffer high-water mark in bytes. When a daemon socket's
+  # bufferedAmount is above this, new forwards get 503 rather than queueing onto
+  # a socket that is not draining. Kept above one max body (below).
+  max_buffered_bytes: 16777216   # 16 MiB
+  # Max inbound webhook body in bytes; larger requests are rejected by the
+  # public listener before they reach the daemon.
+  max_body_bytes: 5242880        # 5 MiB
+
 broker:
   session_ttl_ms: 300000
 

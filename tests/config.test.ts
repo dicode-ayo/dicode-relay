@@ -21,6 +21,9 @@ describe("defaultConfig", () => {
     expect(cfg.relay.ping_interval_ms).toBe(30_000);
     expect(cfg.relay.pong_timeout_ms).toBe(10_000);
     expect(cfg.relay.request_timeout_ms).toBe(30_000);
+    expect(cfg.relay.max_pending_per_client).toBe(256);
+    expect(cfg.relay.max_buffered_bytes).toBe(16 * 1024 * 1024);
+    expect(cfg.relay.max_body_bytes).toBe(5 * 1024 * 1024);
     expect(cfg.broker.session_ttl_ms).toBe(300_000);
     expect(cfg.broker.providers).toEqual({});
   });

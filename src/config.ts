@@ -148,6 +148,28 @@ const RelaySchema = z.object({
   ping_interval_ms: z.number().int().default(30_000),
   pong_timeout_ms: z.number().int().default(10_000),
   request_timeout_ms: z.number().int().default(30_000),
+  // Per-daemon cap on outstanding forwards. A slow daemon behind sustained
+  // inbound load would otherwise let the pending map grow without bound;
+  // beyond this many in-flight requests to one uuid, new inbound requests are
+  // rejected with 429 instead of queued. Sized well above any single daemon's
+  // realistic concurrency so normal bursts never trip it.
+  max_pending_per_client: z.number().int().positive().default(256),
+  // WS send-buffer backpressure threshold in bytes. When a daemon socket's
+  // bufferedAmount exceeds this, new forwards are rejected with 503 rather than
+  // piling onto a socket that is not draining. Above one max body so a single
+  // large webhook never trips it.
+  max_buffered_bytes: z
+    .number()
+    .int()
+    .positive()
+    .default(16 * 1024 * 1024),
+  // Inbound webhook body cap in bytes for the public forward path. Bodies over
+  // this are rejected by express before they reach the daemon socket.
+  max_body_bytes: z
+    .number()
+    .int()
+    .positive()
+    .default(5 * 1024 * 1024),
 });
 
 const BrokerSchema = z.object({
