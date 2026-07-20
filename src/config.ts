@@ -84,6 +84,17 @@ const MtlsSchema = z.object({
 const ServerSchema = z
   .object({
     port: z.number().int().default(5553),
+    // Declares a multi-instance deployment (2+ relay instances behind a load
+    // balancer sharing one public identity). When true, the per-cwd
+    // auto-generate fallbacks for the broker signing key and the mTLS server
+    // cert become a hard startup error: divergent per-instance material would
+    // make daemons reject token-delivery signatures (broker_sig) and cert
+    // pinning against every instance but the one that minted the key. Operators
+    // must instead supply identical shared material to every instance
+    // (broker.signing_key_file + server.mtls.cert_file/key_file, or a shared
+    // server.tls cert). Default false keeps the single-instance auto-generate
+    // convenience.
+    multi_instance: z.boolean().default(false),
     // base_url is optional (absent → fall back to http://localhost:<port>
     // via the .transform below), but when explicitly set in YAML it must be a
     // non-empty string. Catches the common footgun of writing

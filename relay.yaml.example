@@ -12,6 +12,17 @@ server:
   # (Cloudflare, nginx).
   port: 5553
   base_url: http://localhost:5553
+
+  # Declare a multi-instance deployment (2+ relay instances behind a load
+  # balancer sharing one public identity). Default false = single instance,
+  # where the broker signing key and mTLS server cert auto-generate on first
+  # start. Set true and ALL instances become fail-fast until you supply
+  # identical shared material to every instance: broker.signing_key_file plus
+  # server.mtls.cert_file/key_file (or a shared server.tls cert). Without it,
+  # each instance mints its own key/cert and daemons reject token deliveries
+  # and cert pins from every instance but one. See docs/scaling.md.
+  multi_instance: false
+
   tls:
     cert_file: ""          # e.g. ${TLS_CERT_FILE}
     key_file: ""           # e.g. ${TLS_KEY_FILE}
@@ -25,7 +36,9 @@ server:
   #
   # cert_file/key_file empty → falls back to server.tls.*; if that is also
   # empty, a self-signed dev cert is auto-generated at cwd/relay-mtls-cert.pem
-  # (point daemons' relay.ca_file at it).
+  # (point daemons' relay.ca_file at it). The auto-generate path is
+  # single-instance only — with server.multi_instance: true it becomes a
+  # startup error, since each instance would otherwise pin a different cert.
   mtls:
     port: 5554
     cert_file: ""          # e.g. ${MTLS_CERT_FILE}
@@ -57,7 +70,8 @@ broker:
   # this field, and auto-generates a fresh key on every start, rotating
   # the broker's public key and invalidating delivery signatures for
   # daemons that have not reconnected since. Either write the absolute
-  # path literally, or set the env var.
+  # path literally, or set the env var. Required (identical across instances)
+  # when server.multi_instance: true — auto-generate is refused in that mode.
   signing_key_file: ""     # empty → auto-generate at cwd/broker-signing-key.pem
 
   # OAuth providers — add your own or override defaults.

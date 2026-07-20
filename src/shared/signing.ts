@@ -84,12 +84,20 @@ const FLOW_COOKIE_KEY_LABEL = "dicode/oauth-flow-cookie/v1";
  *                           `startServer({ dryRun: true })` passes `false` so
  *                           config-validation runs never write secret material
  *                           into the caller's cwd.
+ * @param requireSharedKey   when `true` (from `server.multi_instance`), the
+ *                           legacy cwd-fallback is disabled entirely: reaching
+ *                           it throws. A per-cwd key — freshly generated or
+ *                           read back from an earlier auto-generate — diverges
+ *                           across instances, so multi-instance deployments
+ *                           must supply one shared key via env or
+ *                           `broker.signing_key_file`.
  */
 export function loadBrokerSigningKey(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
   signingKeyFile = "",
   allowAutoGenerate = true,
+  requireSharedKey = false,
 ): BrokerSigningKey {
   let pem: string;
 
@@ -113,6 +121,20 @@ export function loadBrokerSigningKey(
       );
     }
     pem = readFileSync(signingKeyFile, "utf8");
+  } else if (requireSharedKey) {
+    // Multi-instance mode: the legacy cwd-fallback is a per-instance key, and
+    // reading a previously auto-generated one back is just as divergent as
+    // minting a fresh one. Refuse both — every instance must present the same
+    // broker pubkey or daemons reject broker_sig on token delivery from all
+    // but the signing instance.
+    throw new Error(
+      `server.multi_instance is set but no shared broker signing key was supplied. ` +
+        `Every relay instance behind the load balancer must present an identical broker ` +
+        `pubkey — otherwise daemons reject the token-delivery signature (broker_sig) from ` +
+        `every instance but the one that signed it. Supply one shared P-256 key to all ` +
+        `instances via BROKER_SIGNING_KEY_FILE / BROKER_SIGNING_KEY env or ` +
+        `broker.signing_key_file, or unset server.multi_instance for single-instance mode.`,
+    );
   } else {
     // No env, no inline key, no YAML path. Fall back to the legacy
     // cwd-relative location and auto-generate on first start.
@@ -140,8 +162,12 @@ export function loadBrokerSigningKey(
       mkdirSync(dirname(autoPath), { recursive: true });
       writeFileSync(autoPath, pair.privateKey, { mode: 0o600 });
       console.warn(
-        `broker: generated signing key at ${autoPath} — ` +
-          `set BROKER_SIGNING_KEY_FILE or broker.signing_key_file to use a persistent key`,
+        `broker: no shared signing key configured — generated a per-instance key at ${autoPath}. ` +
+          `SINGLE-INSTANCE ONLY: running more than one relay instance with auto-generated keys ` +
+          `mints divergent broker pubkeys and daemons reject cross-instance token deliveries. ` +
+          `For multi-instance deployments set server.multi_instance: true and hand every ` +
+          `instance the same broker.signing_key_file. Set BROKER_SIGNING_KEY_FILE or ` +
+          `broker.signing_key_file to pin this key.`,
       );
       pem = pair.privateKey;
     }

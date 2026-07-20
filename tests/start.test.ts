@@ -276,6 +276,101 @@ broker:
 });
 
 // ---------------------------------------------------------------------------
+// server.multi_instance fail-fast on divergent identity material
+// ---------------------------------------------------------------------------
+
+describe("startServer multi_instance", () => {
+  let ctx: FixtureContext;
+
+  beforeEach(() => {
+    ctx = makeFixture();
+  });
+
+  afterEach(() => {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  });
+
+  /** Env with every BROKER_SIGNING_KEY* var stripped so the fallback fires. */
+  function envWithoutSigningKey(): NodeJS.ProcessEnv {
+    const env = { ...process.env };
+    delete env.BROKER_SIGNING_KEY_FILE;
+    delete env.BROKER_SIGNING_KEY;
+    return env;
+  }
+
+  /** Write a shared mTLS cert/key pair into the fixture and return the paths. */
+  async function writeSharedMtls(): Promise<{ certPath: string; keyPath: string }> {
+    const cert = await testServerCert();
+    const certPath = join(ctx.dir, "shared-mtls-cert.pem");
+    const keyPath = join(ctx.dir, "shared-mtls-key.pem");
+    writeFileSync(certPath, cert.certPem);
+    writeFileSync(keyPath, cert.keyPem, { mode: 0o600 });
+    return { certPath, keyPath };
+  }
+
+  it("fails fast when multi_instance is set but no shared mTLS cert is supplied", async () => {
+    writeYaml(
+      ctx,
+      `
+server:
+  multi_instance: true
+broker:
+  signing_key_file: ${ctx.signingKeyPath}
+`,
+    );
+
+    await expect(
+      startServer({ configPath: ctx.configPath, env: envWithoutSigningKey(), dryRun: true }),
+    ).rejects.toThrow(/server\.multi_instance is set but no shared mTLS server certificate/);
+  });
+
+  it("fails fast when multi_instance is set but no shared broker signing key is supplied", async () => {
+    // Supply the mTLS cert (resolved first in startServer) so the signing-key
+    // fail-fast is the surface under test.
+    const { certPath, keyPath } = await writeSharedMtls();
+    writeYaml(
+      ctx,
+      `
+server:
+  multi_instance: true
+  mtls:
+    cert_file: ${certPath}
+    key_file: ${keyPath}
+broker:
+  signing_key_file: ""
+`,
+    );
+
+    await expect(
+      startServer({ configPath: ctx.configPath, env: envWithoutSigningKey(), dryRun: true }),
+    ).rejects.toThrow(/server\.multi_instance is set but no shared broker signing key/);
+  });
+
+  it("loads cleanly when multi_instance is set and both shared artifacts are supplied", async () => {
+    const { certPath, keyPath } = await writeSharedMtls();
+    writeYaml(
+      ctx,
+      `
+server:
+  multi_instance: true
+  mtls:
+    cert_file: ${certPath}
+    key_file: ${keyPath}
+broker:
+  signing_key_file: ${ctx.signingKeyPath}
+`,
+    );
+
+    const handle = await startServer({
+      configPath: ctx.configPath,
+      env: envWithoutSigningKey(),
+      dryRun: true,
+    });
+    await expect(handle.close()).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // opts.env scoping for the E2E mock router
 // ---------------------------------------------------------------------------
 

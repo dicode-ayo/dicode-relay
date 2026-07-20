@@ -146,6 +146,7 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
     process.cwd(),
     brokerCfg.signing_key_file,
     allowAutoGenerate,
+    serverCfg.multi_instance,
   );
 
   // -------------------------------------------------------------------------
@@ -406,6 +407,11 @@ interface MtlsCertPems {
  *      `<cwd>/relay-mtls-cert.pem` / `-key.pem` (CA:FALSE — required by
  *      rustls-based daemons). Daemons trust it via an explicit CA option.
  *      In dryRun the cert is ephemeral and never written to disk.
+ *
+ * When `server.multi_instance` is set, the auto-generate fallback (step 3) is
+ * a hard error: a per-cwd self-signed cert diverges across instances and
+ * breaks the pin daemons hold via `relay.ca_file`. Operators must supply a
+ * shared cert (step 1, or the shared step-2 `server.tls` cert).
  */
 async function resolveMtlsCert(
   serverCfg: RelayConfig["server"],
@@ -435,6 +441,19 @@ async function resolveMtlsCert(
     };
   }
 
+  if (serverCfg.multi_instance) {
+    // A per-cwd self-signed cert — freshly generated or read back from an
+    // earlier auto-generate — diverges across instances and fails the pin
+    // daemons hold via relay.ca_file. Refuse to fall back here.
+    throw new Error(
+      `server.multi_instance is set but no shared mTLS server certificate was supplied. ` +
+        `Daemons pin the relay's mTLS cert (relay.ca_file); an auto-generated per-instance ` +
+        `cert fails pinning against every instance but the one that generated it. Supply a ` +
+        `cert identical across all instances via server.mtls.cert_file/key_file (or a shared ` +
+        `server.tls.cert_file/key_file), or unset server.multi_instance for single-instance mode.`,
+    );
+  }
+
   const certPath = join(process.cwd(), AUTO_MTLS_CERT_FILENAME);
   const keyPath = join(process.cwd(), AUTO_MTLS_KEY_FILENAME);
   if (existsSync(certPath) && existsSync(keyPath)) {
@@ -457,9 +476,12 @@ async function resolveMtlsCert(
     writeFileSync(certPath, generated.certPem, { mode: 0o644 });
     writeFileSync(keyPath, generated.keyPem, { mode: 0o600 });
     console.warn(
-      `relay: generated self-signed mTLS server cert at ${certPath} — ` +
-        `point daemons' relay.ca_file at it, or set server.mtls.cert_file/key_file ` +
-        `to use an operator-managed certificate`,
+      `relay: no shared mTLS server cert configured — generated a per-instance self-signed cert ` +
+        `at ${certPath}. SINGLE-INSTANCE ONLY: daemons pin this cert via relay.ca_file, so a ` +
+        `second instance with its own auto-generated cert would be rejected. For multi-instance ` +
+        `deployments set server.multi_instance: true and hand every instance the same ` +
+        `server.mtls.cert_file/key_file. Point daemons' relay.ca_file at this cert, or set ` +
+        `server.mtls.cert_file/key_file to use an operator-managed certificate.`,
     );
   }
   return generated;
