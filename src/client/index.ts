@@ -4,6 +4,7 @@ export type {
   RelayClientLogger,
   RelayClientTls,
   RelayStatus,
+  RelayEndpointStatus,
 } from "./client.js";
 
 export { Identity } from "./identity.js";
