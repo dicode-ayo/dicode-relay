@@ -31,7 +31,7 @@ import { createServer as createHttpsServer, type Server as HttpsServer } from "n
 import express from "express";
 import { generateSelfSignedServerCert } from "./shared/certs.js";
 import { ConfigSchema, loadConfig, type RelayConfig } from "./config.js";
-import { RelayServer } from "./relay/server.js";
+import { RelayServer, BackpressureError, PendingCapExceededError } from "./relay/server.js";
 import { buildGrantMiddleware } from "./broker/grant.js";
 import { buildBrokerRouter } from "./broker/router.js";
 import { MOCK_PROVIDER_KEY, buildE2EMockRouter, isE2EMockEnabled } from "./broker/e2e-mock.js";
@@ -159,6 +159,8 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
     pingIntervalMs: relayCfg.ping_interval_ms,
     pongTimeoutMs: relayCfg.pong_timeout_ms,
     requestTimeoutMs: relayCfg.request_timeout_ms,
+    maxPendingPerClient: relayCfg.max_pending_per_client,
+    maxBufferedBytes: relayCfg.max_buffered_bytes,
     brokerPubkey: brokerKey.publicKeyBase64,
   });
 
@@ -266,8 +268,17 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
           res.end();
         }
       })
-      .catch(() => {
-        res.status(504).json({ error: "forwarding failed or timed out" });
+      .catch((err: unknown) => {
+        // Availability rejections are distinct from a forward that reached the
+        // daemon and failed/timed out (504): the cap sheds inbound load (429,
+        // retriable) and backpressure signals a saturated socket (503).
+        if (err instanceof PendingCapExceededError) {
+          res.status(429).json({ error: "daemon overloaded — too many in-flight requests" });
+        } else if (err instanceof BackpressureError) {
+          res.status(503).json({ error: "daemon connection saturated" });
+        } else {
+          res.status(504).json({ error: "forwarding failed or timed out" });
+        }
       });
   }
 
@@ -280,13 +291,15 @@ export async function startServer(opts: StartOpts = {}): Promise<StartHandle> {
     return i === -1 ? "" : req.originalUrl.slice(i);
   }
 
+  const bodyLimit = relayCfg.max_body_bytes;
+
   // /u/:uuid/dicode.js — client SDK served by the daemon
-  app.get("/u/:uuid/dicode.js", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
+  app.get("/u/:uuid/dicode.js", express.raw({ type: "*/*", limit: bodyLimit }), (req, res) => {
     forwardToClient(req, res, req.params.uuid, "/dicode.js" + rawQuery(req));
   });
 
   // /u/:uuid/hooks/* — webhook requests forwarded to daemon
-  app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
+  app.all("/u/:uuid/hooks/*path", express.raw({ type: "*/*", limit: bodyLimit }), (req, res) => {
     const uuid = req.params.uuid;
     const pathParam = req.params.path;
     const pathStr = Array.isArray(pathParam) ? pathParam.join("/") : pathParam;

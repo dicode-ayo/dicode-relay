@@ -59,6 +59,24 @@ export class ForwardTimeoutError extends Error {
   }
 }
 
+/** Raised by forward() when a daemon already has the maximum number of
+ *  outstanding forwards. The HTTP layer maps this to 429. */
+export class PendingCapExceededError extends Error {
+  constructor(uuid: string) {
+    super(`Too many outstanding forwards for client: ${uuid}`);
+    this.name = "PendingCapExceededError";
+  }
+}
+
+/** Raised by forward() when a daemon socket's send buffer is above the
+ *  backpressure threshold. The HTTP layer maps this to 503. */
+export class BackpressureError extends Error {
+  constructor(uuid: string) {
+    super(`Client socket send buffer saturated: ${uuid}`);
+    this.name = "BackpressureError";
+  }
+}
+
 /**
  * Broker protocol version advertised in the welcome message.
  * Version 4 means: mTLS control channel — daemon identity travels in the TLS
@@ -93,6 +111,9 @@ export interface ConnectedClient {
 // ---------------------------------------------------------------------------
 
 interface PendingRequest {
+  /** uuid of the daemon this forward was issued to — needed to decrement the
+   *  per-client outstanding count when the entry is removed. */
+  uuid: string;
   resolve: (response: ForwardResponse) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -116,6 +137,12 @@ export interface RelayServerOptions {
   pingIntervalMs: number;
   pongTimeoutMs: number;
   requestTimeoutMs: number;
+  /** Max outstanding forwards per daemon uuid before forward() rejects with
+   *  PendingCapExceededError. */
+  maxPendingPerClient: number;
+  /** ws.bufferedAmount threshold (bytes) above which forward() rejects with
+   *  BackpressureError instead of queueing onto a non-draining socket. */
+  maxBufferedBytes: number;
   /** Base64-encoded SPKI DER public key for broker delivery signing. Announced in the welcome message. */
   brokerPubkey?: string;
 }
@@ -124,10 +151,15 @@ export class RelayServer extends EventEmitter {
   private readonly wss: WebSocketServer;
   private readonly clients = new Map<string, ConnectedClient>();
   private readonly pending = new Map<string, PendingRequest>();
+  /** Outstanding-forward count per daemon uuid. Kept in lockstep with `pending`
+   *  through addPending/removePending; entries drop to nothing (deleted) at 0. */
+  private readonly pendingByClient = new Map<string, number>();
   private readonly baseUrl: string;
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly maxPendingPerClient: number;
+  private readonly maxBufferedBytes: number;
   private readonly brokerPubkey: string | undefined;
 
   constructor(opts: RelayServerOptions) {
@@ -136,6 +168,8 @@ export class RelayServer extends EventEmitter {
     this.pingIntervalMs = opts.pingIntervalMs;
     this.pongTimeoutMs = opts.pongTimeoutMs;
     this.requestTimeoutMs = opts.requestTimeoutMs;
+    this.maxPendingPerClient = opts.maxPendingPerClient;
+    this.maxBufferedBytes = opts.maxBufferedBytes;
     this.brokerPubkey = opts.brokerPubkey;
 
     this.wss = new WebSocketServer({ server: opts.server });
@@ -182,6 +216,20 @@ export class RelayServer extends EventEmitter {
     body: Buffer,
   ): Promise<ForwardResponse> {
     const client = this.getClient(uuid);
+
+    // Backpressure: refuse to enqueue onto a socket that is not draining.
+    // Checked before the pending cap so a stuck-but-idle socket sheds load
+    // immediately rather than filling the pending map first.
+    if (client.ws.bufferedAmount > this.maxBufferedBytes) {
+      throw new BackpressureError(uuid);
+    }
+
+    // Per-daemon outstanding-forward cap — bounds the pending map so a slow
+    // daemon under sustained inbound load cannot grow it without limit.
+    if ((this.pendingByClient.get(uuid) ?? 0) >= this.maxPendingPerClient) {
+      throw new PendingCapExceededError(uuid);
+    }
+
     const id = uuidv4();
 
     // Build the generated Request. Headers map entries wrap their string
@@ -203,23 +251,48 @@ export class RelayServer extends EventEmitter {
 
     return new Promise<ForwardResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
+        this.removePending(id);
         reject(new ForwardTimeoutError(id));
       }, this.requestTimeoutMs);
       timer.unref();
 
-      this.pending.set(id, { resolve, reject, timer });
+      this.addPending(id, { uuid, resolve, reject, timer });
       this.sendServerMessage(client.ws, envelope);
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Pending-request bookkeeping — keeps `pending` and the per-client count in
+  // lockstep so the outstanding-forward cap stays accurate across every exit
+  // path (response, timeout, server close).
+  // ---------------------------------------------------------------------------
+
+  private addPending(id: string, req: PendingRequest): void {
+    this.pending.set(id, req);
+    this.pendingByClient.set(req.uuid, (this.pendingByClient.get(req.uuid) ?? 0) + 1);
+  }
+
+  private removePending(id: string): PendingRequest | undefined {
+    const req = this.pending.get(id);
+    if (req === undefined) return undefined;
+    this.pending.delete(id);
+    const count = this.pendingByClient.get(req.uuid) ?? 0;
+    if (count <= 1) {
+      this.pendingByClient.delete(req.uuid);
+    } else {
+      this.pendingByClient.set(req.uuid, count - 1);
+    }
+    return req;
+  }
+
   close(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      for (const [id, pending] of this.pending) {
+      for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
         pending.reject(new Error("Server closing"));
-        this.pending.delete(id);
       }
+      this.pending.clear();
+      this.pendingByClient.clear();
 
       for (const client of this.clients.values()) {
         client.ws.terminate();
@@ -401,10 +474,9 @@ export class RelayServer extends EventEmitter {
       if (response.status < 100 || response.status > 599) {
         return;
       }
-      const req = this.pending.get(response.id);
+      const req = this.removePending(response.id);
       if (req !== undefined) {
         clearTimeout(req.timer);
-        this.pending.delete(response.id);
         req.resolve(this.flattenResponse(response));
       }
     });

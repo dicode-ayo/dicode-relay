@@ -186,6 +186,8 @@ export function testRelayOpts(
     pingIntervalMs: cfg.relay.ping_interval_ms,
     pongTimeoutMs: cfg.relay.pong_timeout_ms,
     requestTimeoutMs: cfg.relay.request_timeout_ms,
+    maxPendingPerClient: cfg.relay.max_pending_per_client,
+    maxBufferedBytes: cfg.relay.max_buffered_bytes,
     ...overrides,
   };
 }

@@ -2,8 +2,13 @@
  * Relay forwarding tests — real mTLS connections, no mocks.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ClientNotConnectedError, ForwardTimeoutError } from "../../src/relay/server.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  BackpressureError,
+  ClientNotConnectedError,
+  ForwardTimeoutError,
+  PendingCapExceededError,
+} from "../../src/relay/server.js";
 import {
   startMtlsRelay,
   testDaemon,
@@ -161,6 +166,81 @@ describe("Relay forwarding", () => {
     const closing = temp.close();
     await expect(forwardPromise).rejects.toThrow("Server closing");
     await closing;
+  });
+
+  it("rejects at the per-daemon pending cap and recovers as forwards drain", async () => {
+    const temp = await startMtlsRelay({ baseUrl: "wss://test.local", maxPendingPerClient: 2 });
+    try {
+      const daemon = await testDaemon(temp);
+      const { ws } = await connectDaemon(temp, daemon);
+
+      // Record the ids the daemon receives but don't auto-respond — the test
+      // drains specific requests by id to exercise cap recovery.
+      const ids: string[] = [];
+      ws.on("message", (data: Buffer | string) => {
+        const req = parseRequest(data);
+        if (req !== null) ids.push(req.id);
+      });
+      const drain = (i: number): void => {
+        const id = ids[i];
+        if (id === undefined) throw new Error(`no request received at index ${String(i)}`);
+        ws.send(responseEnvelope({ id, status: 200, body: "" }));
+      };
+
+      // Two in-flight forwards fill the cap (no responses → they stay pending).
+      const p1 = temp.relay.forward(daemon.identity.uuid, "POST", "/hooks/a", {}, Buffer.alloc(0));
+      const p2 = temp.relay.forward(daemon.identity.uuid, "POST", "/hooks/b", {}, Buffer.alloc(0));
+
+      // Third forward exceeds the cap → rejected, and never reaches the daemon.
+      await expect(
+        temp.relay.forward(daemon.identity.uuid, "POST", "/hooks/c", {}, Buffer.alloc(0)),
+      ).rejects.toThrow(PendingCapExceededError);
+      await vi.waitFor(() => {
+        expect(ids).toHaveLength(2);
+      });
+
+      // Drain one → outstanding count drops below the cap.
+      drain(0);
+      await p1;
+
+      // A fresh forward now fits under the cap and completes.
+      const p3 = temp.relay.forward(daemon.identity.uuid, "POST", "/hooks/d", {}, Buffer.alloc(0));
+      await vi.waitFor(() => {
+        expect(ids).toHaveLength(3);
+      });
+      drain(2);
+      expect((await p3).status).toBe(200);
+
+      // Drain the remaining in-flight forward so close() has nothing pending.
+      drain(1);
+      await p2;
+
+      ws.terminate();
+    } finally {
+      await temp.close();
+    }
+  });
+
+  it("rejects with BackpressureError when the socket send buffer is over threshold", async () => {
+    const temp = await startMtlsRelay({ baseUrl: "wss://test.local", maxBufferedBytes: 1000 });
+    try {
+      const daemon = await testDaemon(temp);
+      await connectDaemon(temp, daemon);
+
+      // Stub the server-side socket's bufferedAmount above the threshold — an
+      // own property shadows ws's prototype getter.
+      const client = temp.relay.getClient(daemon.identity.uuid);
+      Object.defineProperty(client.ws, "bufferedAmount", {
+        configurable: true,
+        get: () => 2000,
+      });
+
+      await expect(
+        temp.relay.forward(daemon.identity.uuid, "POST", "/hooks/x", {}, Buffer.alloc(0)),
+      ).rejects.toThrow(BackpressureError);
+    } finally {
+      await temp.close();
+    }
   });
 
   it("concurrent forwards to same client both resolve", async () => {
