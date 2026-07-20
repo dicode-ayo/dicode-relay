@@ -340,6 +340,30 @@ const client = new RelayClient({
 await client.run();
 ```
 
+For a multi-instance broker, pass `serverURLs: [...]` instead of `serverURL`.
+The client then holds one independent mTLS control connection per URL — all
+sharing the same identity, so every instance registers the same daemon uuid
+and any instance can forward locally. Each connection reconnects on its own,
+and `onBrokerPubkey` fires once per instance. `serverURL` and `serverURLs` are
+mutually exclusive; exactly one must be set (`serverURL` stays as the
+single-instance shorthand). `onStatus` reports an aggregate — `connected` is
+true while at least one instance is up, with a per-URL `endpoints` breakdown
+when more than one URL is configured.
+
+```ts
+const client = new RelayClient({
+  serverURLs: [
+    "wss://broker-0.relay.example:5554/",
+    "wss://broker-1.relay.example:5554/",
+  ],
+  localPort: 8080,
+  identity,
+  tls: { certPem: clientCert.certPem, keyPem: clientCert.keyPem },
+  onBrokerPubkey: async (b64) => myKv.set("broker_pubkey", b64),
+  log: console,
+});
+```
+
 The client targets Node.js 22+ and Deno (both expose `node:crypto`). It is not
 browser-compatible — `node:crypto` primitives are used for HKDF, AES-GCM decrypt,
 and broker signature verification. In dicode tasks, use `dicode.kv` from the

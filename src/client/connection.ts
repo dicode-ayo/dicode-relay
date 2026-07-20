@@ -1,0 +1,386 @@
+import { Agent as HttpsAgent } from "node:https";
+import WebSocket from "ws";
+import { create, fromJson, toJson, type JsonValue } from "@bufbuild/protobuf";
+import { ClientMessageSchema, ServerMessageSchema } from "../relay/pb/relay_pb.js";
+import type { Identity } from "./identity.js";
+import { runHandshake, type SocketLike } from "./handshake.js";
+import { dispatchRequest } from "./forwarder.js";
+import { newBackoff } from "./backoff.js";
+import type { RelayClientLogger, RelayClientTls, RelayEndpointStatus } from "./client.js";
+
+const STABLE_MS = 10_000;
+const DIAL_TIMEOUT_MS = 15_000;
+const HANDSHAKE_TIMEOUT_MS = 15_000;
+
+/** WS close codes the broker uses for mTLS admission failures
+ *  (mirrors CLOSE_* in relay/server.ts). */
+const MTLS_CLOSE_MESSAGES: Record<number, string> = {
+  4400: "broker rejected our hello frame",
+  4401: "broker did not receive our TLS client certificate — check that the tls option carries the identity cert/key and that no TLS-terminating proxy sits in front of the mTLS port",
+  4402: "broker rejected our TLS client certificate: key is not P-256",
+};
+
+export interface ConnectionOptions {
+  /** wss:// URL of one broker instance's mTLS control port. */
+  serverURL: string;
+  localPort: number;
+  identity: Identity;
+  tls: RelayClientTls;
+  onBrokerPubkey?: (brokerPubkeyB64: string) => Promise<void>;
+  log: RelayClientLogger;
+  /** Reports this connection's status on every state change. */
+  onStatus: (s: RelayEndpointStatus) => void;
+  dialTimeoutMs?: number;
+  handshakeTimeoutMs?: number;
+}
+
+/**
+ * One long-lived mTLS control connection to a single broker instance.
+ * Owns its own handshake, welcome verification, serve loop, and
+ * exponential-backoff reconnect — a drop here reconnects only this
+ * connection. Forwarding is answered on the same socket the request
+ * arrived on, so request/response correlation never crosses connections.
+ */
+export class Connection {
+  private readonly status: RelayEndpointStatus;
+
+  constructor(private opts: ConnectionOptions) {
+    this.status = { server_url: opts.serverURL, connected: false, reconnect_attempts: 0 };
+  }
+
+  private report(): void {
+    // Emit a snapshot so the aggregator (and consumers) never alias our
+    // mutable status object.
+    this.opts.onStatus({ ...this.status });
+  }
+
+  /**
+   * Run until `signal` is aborted. Each iteration is one connection attempt:
+   * dial, handshake, serve until close, then back off. Never rejects on a
+   * transport failure — it keeps retrying until aborted.
+   */
+  async run(signal?: AbortSignal): Promise<void> {
+    const bo = newBackoff();
+
+    while (signal?.aborted !== true) {
+      const start = Date.now();
+      try {
+        await this.runOnce(signal);
+        if (Date.now() - start >= STABLE_MS) bo.reset();
+        // Clean disconnect — flip status before backoff sleep so health reporters see "down".
+        this.status.connected = false;
+        this.report();
+      } catch (err) {
+        this.status.connected = false;
+        this.status.last_error = String(err);
+        this.status.reconnect_attempts++;
+        this.report();
+        this.opts.log.warn("relay disconnected", {
+          server_url: this.opts.serverURL,
+          err: String(err),
+        });
+      }
+      const wait = bo.next();
+      // Allow signal to interrupt the backoff sleep.
+      let backoffHandle: ReturnType<typeof setTimeout> | undefined;
+      const timer = new Promise<void>((r) => {
+        backoffHandle = setTimeout(r, wait);
+      });
+      const aborted = new Promise<void>((r) => {
+        // An abort that landed *during* runOnce (e.g. mid-dial) leaves the
+        // signal already aborted here; addEventListener never fires
+        // retroactively, so without this the client would sleep the full
+        // backoff before noticing and exit slowly on shutdown.
+        if (signal?.aborted === true) {
+          r();
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () => {
+            r();
+          },
+          { once: true },
+        );
+      });
+      await Promise.race([timer, aborted]);
+      if (backoffHandle !== undefined) clearTimeout(backoffHandle);
+    }
+  }
+
+  private async runOnce(signal?: AbortSignal): Promise<void> {
+    // The dial timeout is enforced manually below rather than via ws's
+    // { handshakeTimeout } option: under Deno's node:http polyfill ws leaves its
+    // internal handshake timer armed after "open", so it later fires
+    // abortHandshake() on an already-nulled request (TypeError: reading
+    // 'setHeader' of null) and tears a healthy connection down ~DIAL_TIMEOUT_MS
+    // after connecting, causing a permanent reconnect flap.
+    //
+    // The TLS options MUST ride on an https.Agent: Deno's node:https drops
+    // per-request TLS options ({cert,key,ca} directly in the ws options
+    // object) and ignores createConnection. Agent-carried options work on
+    // both Deno and Node (see spikes/README.md).
+    const { tls } = this.opts;
+    const agent = new HttpsAgent({
+      cert: tls.certPem,
+      key: tls.keyPem,
+      ...(tls.ca !== undefined ? { ca: tls.ca } : {}),
+    });
+    const ws = new WebSocket(this.opts.serverURL, { agent });
+
+    // Register the message adapter BEFORE awaiting "open". The relay server sends
+    // a challenge frame immediately upon connection. If we registered the listener
+    // after the "open" promise resolves, the challenge could arrive (and be dropped
+    // by the EventEmitter) during the microtask gap between open firing and our
+    // .then() continuation — causing recv() in runHandshake to hang forever.
+    const { sock, detach } = adaptWs(ws);
+
+    await new Promise<void>((resolve, reject) => {
+      // terminate() on a still-CONNECTING socket emits an 'error' on the next
+      // tick; cleanup() has already removed our 'error' listener, so without a
+      // catch-all that becomes an unhandled 'error' event (uncaughtException /
+      // process crash). Swallow it before aborting the dial.
+      const terminateQuietly = (): void => {
+        ws.once("error", () => {
+          /* swallow the 'error' terminate() emits on a still-CONNECTING socket */
+        });
+        ws.terminate();
+      };
+      const dialTimer = setTimeout((): void => {
+        cleanup();
+        terminateQuietly();
+        reject(new Error("dial timeout"));
+      }, this.opts.dialTimeoutMs ?? DIAL_TIMEOUT_MS);
+      const onAbort = (): void => {
+        cleanup();
+        terminateQuietly();
+        reject(new Error("aborted"));
+      };
+      const onOpen = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(err);
+      };
+      const onClose = (): void => {
+        cleanup();
+        reject(new Error("closed before open"));
+      };
+      const cleanup = (): void => {
+        clearTimeout(dialTimer);
+        signal?.removeEventListener("abort", onAbort);
+        ws.removeListener("open", onOpen);
+        ws.removeListener("error", onError);
+        ws.removeListener("close", onClose);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      ws.once("open", onOpen);
+      ws.once("error", onError);
+      ws.once("close", onClose);
+    });
+
+    // Map broker mTLS admission close codes to actionable errors. These are
+    // persistent failures (bad cert plumbing, terminating proxy in the way) —
+    // the loud message matters more than the retry, which will keep failing.
+    const onAdmissionClose = (code: number): void => {
+      const msg = MTLS_CLOSE_MESSAGES[code];
+      if (msg !== undefined) {
+        this.opts.log.error(`relay: ${msg}`, { closeCode: code, server_url: this.opts.serverURL });
+      }
+    };
+    ws.on("close", onAdmissionClose);
+
+    try {
+      // Deadline for the app-level handshake: a broker that accepts the WS
+      // but never sends welcome must not hang runOnce forever. adaptWs
+      // rejects pending recv() calls on socket error/close, and this timer
+      // covers the silent-but-healthy-socket case.
+      let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+      const hr = await Promise.race([
+        runHandshake(sock, this.opts.identity),
+        new Promise<never>((_, reject) => {
+          handshakeTimer = setTimeout(() => {
+            reject(new Error("handshake timeout"));
+          }, this.opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS);
+        }),
+      ]).finally(() => {
+        clearTimeout(handshakeTimer);
+      });
+
+      // Await the consumer's broker-key persistence while the handshake
+      // adapter's listener is still attached and buffering: any frame the
+      // broker forwards during this await lands in the adapter inbox and is
+      // replayed below. Awaiting after detach() would open a listener-less
+      // window in which forwarded requests are silently dropped.
+      if (hr.brokerPubkey !== "") {
+        await this.opts.onBrokerPubkey?.(hr.brokerPubkey);
+      }
+
+      // Detach the handshake message listener and collect any frames that
+      // arrived since the welcome frame. The broker may pipeline welcome +
+      // a request back-to-back; without replay those frames would be lost.
+      // No awaits between here and serve() — the detach→serve transition
+      // must stay synchronous so no listener-less gap exists.
+      const leftover = detach();
+      if (leftover.length > 0) {
+        this.opts.log.warn("relay: replayed buffered frames at handshake→serve", {
+          count: leftover.length,
+          server_url: this.opts.serverURL,
+        });
+      }
+      // Replay buffered frames BEFORE serve() registers its listener so that
+      // each frame still goes through handleFrame exactly once.
+      for (const raw of leftover) {
+        void this.handleFrame(ws, raw);
+      }
+
+      this.status.connected = true;
+      this.status.hook_base_url = hr.hookBaseURL;
+      this.status.broker_pubkey = hr.brokerPubkey;
+      delete this.status.last_error;
+      this.status.last_connected_at = Math.floor(Date.now() / 1000);
+      this.report();
+      this.opts.log.info("relay connected", { url: hr.hookBaseURL });
+
+      await this.serve(ws, signal);
+    } finally {
+      ws.removeListener("close", onAdmissionClose);
+      try {
+        ws.terminate();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+
+  private serve(ws: WebSocket, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // The socket may have closed while runOnce was awaiting
+      // onBrokerPubkey — its 'close' already fired and will not fire again
+      // for the listener attached below.
+      if (ws.readyState === WebSocket.CLOSED) {
+        resolve();
+        return;
+      }
+      const onAbort = (): void => {
+        ws.terminate();
+      };
+      const onClose = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(err);
+      };
+      const onMessage = (data: Buffer | string): void => {
+        void this.handleFrame(ws, data);
+      };
+      const cleanup = (): void => {
+        signal?.removeEventListener("abort", onAbort);
+        ws.removeListener("close", onClose);
+        ws.removeListener("error", onError);
+        ws.removeListener("message", onMessage);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      ws.on("close", onClose);
+      ws.on("error", onError);
+      ws.on("message", onMessage);
+    });
+  }
+
+  private async handleFrame(ws: WebSocket, data: Buffer | string): Promise<void> {
+    try {
+      const raw = typeof data === "string" ? data : data.toString("utf8");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw) as unknown;
+      } catch {
+        this.opts.log.warn("relay: malformed JSON from server");
+        return;
+      }
+      let env;
+      try {
+        env = fromJson(ServerMessageSchema, parsed as JsonValue, { ignoreUnknownFields: true });
+      } catch {
+        this.opts.log.warn("relay: malformed envelope");
+        return;
+      }
+      if (env.kind.case !== "request") return;
+
+      const resp = await dispatchRequest(env.kind.value, {
+        localPort: this.opts.localPort,
+        daemonUUID: this.opts.identity.uuid,
+      });
+      const out = create(ClientMessageSchema, { kind: { case: "response", value: resp } });
+      ws.send(JSON.stringify(toJson(ClientMessageSchema, out, { useProtoFieldName: true })));
+    } catch (err) {
+      this.opts.log.warn("relay: handleFrame error", { err: String(err) });
+    }
+  }
+}
+
+/** Adapt the `ws` WebSocket to the SocketLike interface used by runHandshake. */
+function adaptWs(ws: WebSocket): { sock: SocketLike; detach: () => string[] } {
+  const inbox: string[] = [];
+  const waiters: { resolve: (s: string) => void; reject: (err: Error) => void }[] = [];
+  let failure: Error | null = null;
+
+  const onMessage = (data: Buffer | string): void => {
+    const raw = typeof data === "string" ? data : data.toString("utf8");
+    const next = waiters.shift();
+    if (next) next.resolve(raw);
+    else inbox.push(raw);
+  };
+  // A socket error or close during the handshake must reject pending (and
+  // future) recv() calls — otherwise runOnce would await recv() forever and
+  // the reconnect loop would never fire. The error listener also keeps the
+  // ws EventEmitter from throwing on an unhandled 'error' in the window
+  // between the dial promise settling and serve() attaching its listeners.
+  const fail = (err: Error): void => {
+    failure ??= err;
+    for (const w of waiters.splice(0)) w.reject(err);
+  };
+  const onError = (err: Error): void => {
+    fail(err);
+  };
+  const onClose = (code: number): void => {
+    fail(new Error(`socket closed during handshake (code ${String(code)})`));
+  };
+
+  ws.on("message", onMessage);
+  ws.on("error", onError);
+  ws.on("close", onClose);
+
+  return {
+    sock: {
+      send: (s) => {
+        ws.send(s);
+      },
+      recv: () =>
+        new Promise<string>((resolve, reject) => {
+          if (failure !== null) {
+            reject(failure);
+            return;
+          }
+          const queued = inbox.shift();
+          if (queued !== undefined) resolve(queued);
+          else waiters.push({ resolve, reject });
+        }),
+    },
+    detach: (): string[] => {
+      // Remove the handshake listeners so they no longer buffer incoming
+      // frames or intercept lifecycle events (serve() owns those next).
+      // Return any frames that arrived after the final handshake message —
+      // they are pre-serve request frames that must be replayed into
+      // handleFrame so they are not silently lost during the
+      // handshake→serve transition gap.
+      ws.removeListener("message", onMessage);
+      ws.removeListener("error", onError);
+      ws.removeListener("close", onClose);
+      return inbox.splice(0);
+    },
+  };
+}
