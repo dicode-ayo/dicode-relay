@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.1](https://github.com/dicode-ayo/dicode-relay/compare/v0.2.0...v0.2.1) (2026-07-20)
+
+
+### Features
+
+* **broker:** pending-map cap + WS send backpressure on the forward path ([#117](https://github.com/dicode-ayo/dicode-relay/issues/117)) ([90ca253](https://github.com/dicode-ayo/dicode-relay/commit/90ca25313d8e27d1eb6ace3eed4c17584a4d6dcf))
+* **client:** fan out one mTLS control connection per broker URL ([#118](https://github.com/dicode-ayo/dicode-relay/issues/118)) ([5421b51](https://github.com/dicode-ayo/dicode-relay/commit/5421b51c0227205f4d9540c0010a06c071f28666)), closes [#109](https://github.com/dicode-ayo/dicode-relay/issues/109)
+* **ops:** fail-fast on divergent identity for multi-instance relay ([#116](https://github.com/dicode-ayo/dicode-relay/issues/116)) ([557552f](https://github.com/dicode-ayo/dicode-relay/commit/557552f8a3945b16bac32eb8cad0816d418321fe)), closes [#108](https://github.com/dicode-ayo/dicode-relay/issues/108)
+
+
+### Bug Fixes
+
+* **broker:** forward the query string to the daemon ([#100](https://github.com/dicode-ayo/dicode-relay/issues/100)) ([#112](https://github.com/dicode-ayo/dicode-relay/issues/112)) ([1b0a42f](https://github.com/dicode-ayo/dicode-relay/commit/1b0a42f30c65038a6e5fedc22d5318e82427c047))
+* **broker:** stateless OAuth flow state; mount cookie session for grant leg ([#107](https://github.com/dicode-ayo/dicode-relay/issues/107)) ([#114](https://github.com/dicode-ayo/dicode-relay/issues/114)) ([d9a0cf8](https://github.com/dicode-ayo/dicode-relay/commit/d9a0cf8ed7988f39afac7db7f9baf68237dab132))
+
 ## [0.2.0](https://github.com/dicode-ayo/dicode-relay/compare/v0.1.9...v0.2.0) (2026-07-16)
 
 
