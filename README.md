@@ -222,7 +222,7 @@ See [docs/providers.md](docs/providers.md) for the full ECIES decryption procedu
 - **ECDSA authentication (OAuth)**: Every broker auth request is signed by the daemon's P-256 identity key over a domain-labeled, length-prefixed preimage. The broker verifies against the public key extracted from the daemon's client certificate — no API key or shared secret required.
 - **ECIES token encryption**: Tokens are encrypted with the daemon's `decrypt_pubkey` (the ECIES-only half of the split sign/decrypt identity, sent on `hello`) before entering the relay code path. The relay server never sees plaintext tokens.
 - **PKCE binding**: The PKCE challenge is signed into the broker request and bound to the session. The verifier stays on the daemon and is never transmitted.
-- **Single-use sessions**: Sessions are deleted immediately after the token is delivered. Replay attacks require re-running the full OAuth flow.
+- **Stateless flow state**: The OAuth browser-flow state is sealed (AES-256-GCM, keyed off the broker signing key) into the flow cookie rather than an in-process store, so the callback can land on any instance behind a load balancer. Single-use is enforced per instance by a short-lived seen-set; cross-instance replay is bounded by the flow TTL.
 - **Timestamp freshness**: OAuth auth requests must be within ±30 s of server time.
 
 See the OAuth broker design document in the dicode-core repository for the full threat model.
@@ -258,8 +258,10 @@ and every connection is rejected with close code 4401. Expose
 `server.mtls.port` directly (grey-cloud DNS record) or behind an L4/TCP load
 balancer with TLS passthrough.
 
-Enable **Session Affinity** in the Cloudflare load balancer if you run multiple
-instances — sessions are stored in-process.
+Multiple instances need **no session affinity** for the OAuth flow — the
+browser-flow state travels in a signed cookie keyed off the shared broker
+signing key, so a callback may land on any instance. Give every instance the
+same `broker.signing_key_file` (or `BROKER_SIGNING_KEY`).
 
 ### Self-host (nginx)
 

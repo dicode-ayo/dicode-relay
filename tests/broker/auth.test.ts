@@ -8,7 +8,8 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildBrokerRouter } from "../../src/broker/router.js";
 import type { ProviderConfig } from "../../src/broker/providers.js";
-import { SessionStore, type Session } from "../../src/broker/sessions.js";
+import { SeenSet, type Session } from "../../src/broker/sessions.js";
+import type { BrokerSigningKey } from "../../src/shared/signing.js";
 import { Identity } from "../../src/client/identity.js";
 import {
   startMtlsRelay,
@@ -17,6 +18,10 @@ import {
   parseRequest,
   responseEnvelope,
   testSessionTtlMs,
+  testBrokerKey,
+  mountFlowSession,
+  decodeFlowCookie,
+  flowCookieHeader,
   type MtlsRelayFixture,
 } from "../helpers.js";
 
@@ -68,14 +73,17 @@ describe("Broker /auth/:provider", () => {
   let fixture: MtlsRelayFixture;
   let httpServer: Server;
   let httpPort: number;
-  let sessions: SessionStore;
+  let seen: SeenSet;
+  let brokerKey: BrokerSigningKey;
 
   beforeEach(async () => {
     fixture = await startMtlsRelay({ baseUrl: "wss://relay.dicode.app" });
-    sessions = new SessionStore(testSessionTtlMs);
+    seen = new SeenSet(testSessionTtlMs);
+    brokerKey = testBrokerKey();
 
     const app = express();
-    app.use(buildBrokerRouter(fixture.relay, sessions, testProviders()));
+    mountFlowSession(app, brokerKey);
+    app.use(buildBrokerRouter(fixture.relay, seen, testProviders(), 30, brokerKey));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -99,10 +107,10 @@ describe("Broker /auth/:provider", () => {
       });
     });
     await fixture.close();
-    sessions.clear();
+    seen.clear();
   });
 
-  it("valid request with correct sig → 302 redirect to Grant", async () => {
+  it("valid request with correct sig → 302 redirect to Grant, flow sealed in cookie", async () => {
     const daemon = await testDaemon(fixture);
     const { ws } = await connectDaemon(fixture, daemon);
 
@@ -114,9 +122,12 @@ describe("Broker /auth/:provider", () => {
     const location = response.headers.get("location");
     expect(location).toContain("/connect/github");
 
-    // Session should be stored
-    expect(sessions.get(sessionId)).toBeDefined();
-    expect(sessions.get(sessionId)?.provider).toBe("github");
+    // Flow state is sealed into the browser cookie (no in-process store).
+    const flow = decodeFlowCookie(response, brokerKey);
+    expect(flow).not.toBeNull();
+    expect(flow?.sessionId).toBe(sessionId);
+    expect(flow?.provider).toBe("github");
+    expect(flow?.relayUuid).toBe(daemon.identity.uuid);
 
     ws.terminate();
   });
@@ -218,14 +229,17 @@ describe("Broker /callback/:provider", () => {
   let fixture: MtlsRelayFixture;
   let httpServer: Server;
   let httpPort: number;
-  let sessions: SessionStore;
+  let seen: SeenSet;
+  let brokerKey: BrokerSigningKey;
 
   beforeEach(async () => {
     fixture = await startMtlsRelay({ baseUrl: "wss://relay.dicode.app" });
-    sessions = new SessionStore(testSessionTtlMs);
+    seen = new SeenSet(testSessionTtlMs);
+    brokerKey = testBrokerKey();
 
     const app = express();
-    app.use(buildBrokerRouter(fixture.relay, sessions, testProviders()));
+    mountFlowSession(app, brokerKey);
+    app.use(buildBrokerRouter(fixture.relay, seen, testProviders(), 30, brokerKey));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -249,7 +263,7 @@ describe("Broker /callback/:provider", () => {
       });
     });
     await fixture.close();
-    sessions.clear();
+    seen.clear();
   });
 
   it("missing state → 400", async () => {
@@ -288,8 +302,8 @@ describe("Broker /callback/:provider", () => {
 
     const sessionId = "550e8400-e29b-41d4-a716-446655440001";
 
-    // Store a session pointing to the connected daemon. The ECIES recipient
-    // is the daemon's decrypt pubkey (v4 split identity).
+    // Flow state pointing to the connected daemon, carried in the cookie. The
+    // ECIES recipient is the daemon's decrypt pubkey (v4 split identity).
     const session: Session = {
       sessionId,
       relayUuid: daemon.identity.uuid,
@@ -298,7 +312,7 @@ describe("Broker /callback/:provider", () => {
       provider: "github",
       expiresAt: Date.now() + 5 * 60 * 1000,
     };
-    sessions.set(session);
+    const cookie = await flowCookieHeader(brokerKey, session);
 
     // Set up the daemon to respond to forwarded requests
     ws.on("message", (data: Buffer | string) => {
@@ -318,13 +332,78 @@ describe("Broker /callback/:provider", () => {
       `http://localhost:${httpPort.toString()}/callback/github` +
       `?state=${encodeURIComponent(sessionId)}&access_token=tok_abc123`;
 
-    const resp = await fetch(url);
+    const resp = await fetch(url, { headers: { cookie } });
     expect(resp.status).toBe(200);
     const body = await resp.text();
     expect(body).toContain("Authorization complete");
 
-    // Session should be deleted after delivery
-    expect(sessions.get(sessionId)).toBeUndefined();
+    // Session id is now recorded as consumed (single-use).
+    expect(seen.has(sessionId)).toBe(true);
+
+    ws.terminate();
+  });
+
+  it("replaying the same callback cookie → 400 (single-use)", async () => {
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
+
+    const sessionId = "550e8400-e29b-41d4-a716-446655440003";
+    const session: Session = {
+      sessionId,
+      relayUuid: daemon.identity.uuid,
+      pubkey: Buffer.from(daemon.identity.decryptPubkeyB64, "base64"),
+      pkceChallenge: randomBytes(32).toString("base64url"),
+      provider: "github",
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    };
+    const cookie = await flowCookieHeader(brokerKey, session);
+
+    ws.on("message", (data: Buffer | string) => {
+      const req = parseRequest(data);
+      if (req !== null) {
+        ws.send(
+          responseEnvelope({ id: req.id, status: 200, body: Buffer.from("{}").toString("base64") }),
+        );
+      }
+    });
+
+    const url =
+      `http://localhost:${httpPort.toString()}/callback/github` +
+      `?state=${encodeURIComponent(sessionId)}&access_token=tok_abc123`;
+
+    const first = await fetch(url, { headers: { cookie } });
+    expect(first.status).toBe(200);
+
+    // Same sealed cookie again — the per-instance seen-set rejects the replay.
+    const second = await fetch(url, { headers: { cookie } });
+    expect(second.status).toBe(400);
+    expect(await second.text()).toContain("already used");
+
+    ws.terminate();
+  });
+
+  it("callback state not matching the sealed session id → 400", async () => {
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
+
+    const sessionId = "550e8400-e29b-41d4-a716-446655440004";
+    const session: Session = {
+      sessionId,
+      relayUuid: daemon.identity.uuid,
+      pubkey: Buffer.from(daemon.identity.decryptPubkeyB64, "base64"),
+      pkceChallenge: randomBytes(32).toString("base64url"),
+      provider: "github",
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    };
+    const cookie = await flowCookieHeader(brokerKey, session);
+
+    const url =
+      `http://localhost:${httpPort.toString()}/callback/github` +
+      `?state=a-different-state&access_token=tok_abc123`;
+
+    const resp = await fetch(url, { headers: { cookie } });
+    expect(resp.status).toBe(400);
+    expect(await resp.text()).toContain("mismatch");
 
     ws.terminate();
   });
@@ -332,7 +411,7 @@ describe("Broker /callback/:provider", () => {
   it("callback with daemon not connected → 503", async () => {
     const sessionId = "550e8400-e29b-41d4-a716-446655440002";
 
-    // Store a session pointing to a non-connected daemon
+    // Flow state pointing to a non-connected daemon.
     const daemonECDH = createECDH("prime256v1");
     daemonECDH.generateKeys();
     const session: Session = {
@@ -343,15 +422,76 @@ describe("Broker /callback/:provider", () => {
       provider: "github",
       expiresAt: Date.now() + 5 * 60 * 1000,
     };
-    sessions.set(session);
+    const cookie = await flowCookieHeader(brokerKey, session);
 
     const url =
       `http://localhost:${httpPort.toString()}/callback/github` +
       `?state=${encodeURIComponent(sessionId)}&access_token=tok_abc123`;
 
-    const resp = await fetch(url);
+    const resp = await fetch(url, { headers: { cookie } });
     expect(resp.status).toBe(503);
     const body = await resp.text();
     expect(body).toContain("retry");
+  });
+
+  it("callback landing on a fresh instance (same broker key) still delivers → LB-safe", async () => {
+    const daemon = await testDaemon(fixture);
+    const { ws } = await connectDaemon(fixture, daemon);
+
+    // Instance B: a brand-new router + seen-set sharing only the broker key
+    // (as every instance behind a load balancer derives the same flow key).
+    const appB = express();
+    mountFlowSession(appB, brokerKey);
+    appB.use(
+      buildBrokerRouter(
+        fixture.relay,
+        new SeenSet(testSessionTtlMs),
+        testProviders(),
+        30,
+        brokerKey,
+      ),
+    );
+    const serverB = await new Promise<Server>((resolve) => {
+      const s = appB.listen(0, () => {
+        resolve(s);
+      });
+    });
+    const portB = (serverB.address() as { port: number }).port;
+
+    const sessionId = "550e8400-e29b-41d4-a716-446655440005";
+    const session: Session = {
+      sessionId,
+      relayUuid: daemon.identity.uuid,
+      pubkey: Buffer.from(daemon.identity.decryptPubkeyB64, "base64"),
+      pkceChallenge: randomBytes(32).toString("base64url"),
+      provider: "github",
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    };
+    // Cookie minted as if by instance A; presented to instance B.
+    const cookie = await flowCookieHeader(brokerKey, session);
+
+    ws.on("message", (data: Buffer | string) => {
+      const req = parseRequest(data);
+      if (req !== null) {
+        ws.send(
+          responseEnvelope({ id: req.id, status: 200, body: Buffer.from("{}").toString("base64") }),
+        );
+      }
+    });
+
+    const resp = await fetch(
+      `http://localhost:${portB.toString()}/callback/github` +
+        `?state=${encodeURIComponent(sessionId)}&access_token=tok_abc123`,
+      { headers: { cookie } },
+    );
+    expect(resp.status).toBe(200);
+    expect(await resp.text()).toContain("Authorization complete");
+
+    await new Promise<void>((resolve) => {
+      serverB.close(() => {
+        resolve();
+      });
+    });
+    ws.terminate();
   });
 });

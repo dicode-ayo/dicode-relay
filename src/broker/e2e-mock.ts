@@ -27,7 +27,8 @@ import { Router as makeRouter, json } from "express";
 import { eciesEncrypt } from "../shared/crypto.js";
 import type { OAuthTokenDeliveryPayload } from "../shared/protocol.js";
 import type { RelayServer } from "../relay/server.js";
-import type { SessionStore } from "./sessions.js";
+import { openFlowState } from "./flow-state.js";
+import { clearBrokerFlow, readBrokerFlow } from "./flow-session.js";
 import { buildDeliverySignaturePayload, type BrokerSigningKey } from "../shared/signing.js";
 
 /** Provider key used throughout the mock flow. */
@@ -71,15 +72,11 @@ interface DeliverBody {
  * Grant never sees it, and BEFORE the broker router so /_test/deliver
  * is reachable.
  */
-export function buildE2EMockRouter(
-  relay: RelayServer,
-  sessions: SessionStore,
-  brokerKey: BrokerSigningKey,
-): Router {
+export function buildE2EMockRouter(relay: RelayServer, brokerKey: BrokerSigningKey): Router {
   const router: Router = makeRouter();
 
   router.get("/connect/mock", (req: Request, res: Response) => {
-    handleConnectMock(req, res, sessions);
+    handleConnectMock(req, res, brokerKey);
   });
 
   // json() is scoped to this route only. The router mounts at the app root
@@ -91,7 +88,7 @@ export function buildE2EMockRouter(
   return router;
 }
 
-function handleConnectMock(req: Request, res: Response, sessions: SessionStore): void {
+function handleConnectMock(req: Request, res: Response, brokerKey: BrokerSigningKey): void {
   const rawState = req.query.state;
   const state = Array.isArray(rawState) ? rawState[0] : rawState;
   if (typeof state !== "string" || state === "") {
@@ -99,9 +96,15 @@ function handleConnectMock(req: Request, res: Response, sessions: SessionStore):
     return;
   }
 
-  const session = sessions.get(state);
-  if (session === undefined) {
+  // Recover the flow state from the sealed cookie set by /auth/mock.
+  const token = readBrokerFlow(req.session);
+  const session = token !== undefined ? openFlowState(brokerKey.flowStateKey, token) : null;
+  if (session === null) {
     res.status(400).send("session not found");
+    return;
+  }
+  if (session.sessionId !== state) {
+    res.status(400).send("session mismatch");
     return;
   }
   if (session.provider !== MOCK_PROVIDER_KEY) {
@@ -109,6 +112,7 @@ function handleConnectMock(req: Request, res: Response, sessions: SessionStore):
     return;
   }
   if (session.expiresAt <= Date.now()) {
+    clearBrokerFlow(req.session);
     res.status(400).send("session expired");
     return;
   }

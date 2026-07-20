@@ -15,7 +15,7 @@ import {
   isE2EMockEnabled,
   MOCK_PROVIDER_KEY,
 } from "../../src/broker/e2e-mock.js";
-import { SessionStore } from "../../src/broker/sessions.js";
+import type { Session } from "../../src/broker/sessions.js";
 import { verifyDeliverySignature } from "../../src/shared/signing.js";
 import type { BrokerSigningKey } from "../../src/shared/signing.js";
 import { loadBrokerSigningKey } from "../../src/shared/signing.js";
@@ -26,7 +26,8 @@ import {
   connectDaemon,
   parseRequest,
   responseEnvelope,
-  testSessionTtlMs,
+  mountFlowSession,
+  flowCookieHeader,
   type MtlsRelayFixture,
 } from "../helpers.js";
 
@@ -43,12 +44,23 @@ describe("E2E mock router", () => {
   let fixture: MtlsRelayFixture;
   let httpServer: Server;
   let httpPort: number;
-  let sessions: SessionStore;
   let brokerKey: BrokerSigningKey;
+
+  /** A mock-provider flow session used to seal a request Cookie header. */
+  function mockSession(sessionId: string, overrides?: Partial<Session>): Session {
+    return {
+      sessionId,
+      relayUuid: "a".repeat(64),
+      pubkey: randomBytes(65),
+      pkceChallenge: "challenge",
+      provider: MOCK_PROVIDER_KEY,
+      expiresAt: Date.now() + 60_000,
+      ...overrides,
+    };
+  }
 
   beforeEach(async () => {
     fixture = await startMtlsRelay({ baseUrl: "wss://relay.test.local" });
-    sessions = new SessionStore(testSessionTtlMs);
     // Use an inline PEM so tests do not touch disk.
     const pair = generateKeyPairSync("ec", {
       namedCurve: "prime256v1",
@@ -58,7 +70,8 @@ describe("E2E mock router", () => {
     brokerKey = loadBrokerSigningKey({ BROKER_SIGNING_KEY: pair.privateKey }, "/tmp");
 
     const app = express();
-    app.use(buildE2EMockRouter(fixture.relay, sessions, brokerKey));
+    mountFlowSession(app, brokerKey);
+    app.use(buildE2EMockRouter(fixture.relay, brokerKey));
 
     await new Promise<void>((resolve) => {
       httpServer = app.listen(0, () => {
@@ -81,7 +94,6 @@ describe("E2E mock router", () => {
       });
     });
     await fixture.close();
-    sessions.clear();
   });
 
   // -------------------------------------------------------------------------
@@ -92,18 +104,14 @@ describe("E2E mock router", () => {
     it("valid session → 302 redirect to /callback/mock with synthetic token", async () => {
       const sessionId = "550e8400-e29b-41d4-a716-446655440000";
       const identity = await Identity.generate();
-      sessions.set({
-        sessionId,
-        relayUuid: identity.uuid,
-        pubkey: decryptPubkeyBytes(identity),
-        pkceChallenge: "challenge",
-        provider: MOCK_PROVIDER_KEY,
-        expiresAt: Date.now() + 60_000,
-      });
+      const cookie = await flowCookieHeader(
+        brokerKey,
+        mockSession(sessionId, { relayUuid: identity.uuid, pubkey: decryptPubkeyBytes(identity) }),
+      );
 
       const response = await fetch(
         `http://localhost:${httpPort.toString()}/connect/mock?state=${sessionId}`,
-        { redirect: "manual" },
+        { redirect: "manual", headers: { cookie } },
       );
 
       expect(response.status).toBe(302);
@@ -120,18 +128,14 @@ describe("E2E mock router", () => {
 
     it("expired session → 400", async () => {
       const sessionId = "bb0e8400-e29b-41d4-a716-446655440000";
-      const identity = await Identity.generate();
-      sessions.set({
-        sessionId,
-        relayUuid: identity.uuid,
-        pubkey: decryptPubkeyBytes(identity),
-        pkceChallenge: "challenge",
-        provider: MOCK_PROVIDER_KEY,
-        expiresAt: Date.now() - 1,
-      });
+      const cookie = await flowCookieHeader(
+        brokerKey,
+        mockSession(sessionId, { expiresAt: Date.now() - 1 }),
+      );
 
       const response = await fetch(
         `http://localhost:${httpPort.toString()}/connect/mock?state=${sessionId}`,
+        { headers: { cookie } },
       );
       expect(response.status).toBe(400);
     });
@@ -141,7 +145,7 @@ describe("E2E mock router", () => {
       expect(response.status).toBe(400);
     });
 
-    it("unknown state → 400", async () => {
+    it("no flow cookie → 400", async () => {
       const response = await fetch(
         `http://localhost:${httpPort.toString()}/connect/mock?state=does-not-exist`,
       );
@@ -150,18 +154,14 @@ describe("E2E mock router", () => {
 
     it("session for a non-mock provider → 400", async () => {
       const sessionId = "aa0e8400-e29b-41d4-a716-446655440000";
-      const identity = await Identity.generate();
-      sessions.set({
-        sessionId,
-        relayUuid: identity.uuid,
-        pubkey: decryptPubkeyBytes(identity),
-        pkceChallenge: "challenge",
-        provider: "github",
-        expiresAt: Date.now() + 60_000,
-      });
+      const cookie = await flowCookieHeader(
+        brokerKey,
+        mockSession(sessionId, { provider: "github" }),
+      );
 
       const response = await fetch(
         `http://localhost:${httpPort.toString()}/connect/mock?state=${sessionId}`,
+        { headers: { cookie } },
       );
       expect(response.status).toBe(400);
     });
@@ -413,12 +413,10 @@ describe("e2e-mock router body-passthrough on unrelated routes", () => {
   let httpServer: Server;
   let httpPort: number;
   let fixture: MtlsRelayFixture;
-  let sessions: SessionStore;
   let brokerKey: BrokerSigningKey;
 
   beforeEach(async () => {
     fixture = await startMtlsRelay({ baseUrl: "wss://relay.test.local" });
-    sessions = new SessionStore(testSessionTtlMs);
     const pair = generateKeyPairSync("ec", {
       namedCurve: "prime256v1",
       publicKeyEncoding: { type: "spki", format: "pem" },
@@ -427,9 +425,10 @@ describe("e2e-mock router body-passthrough on unrelated routes", () => {
     brokerKey = loadBrokerSigningKey({ BROKER_SIGNING_KEY: pair.privateKey }, "/tmp");
 
     const app = express();
+    mountFlowSession(app, brokerKey);
     // Mount the e2e-mock router FIRST (same order as src/index.ts when the
     // flag is on) — this is the configuration we're guarding against.
-    app.use(buildE2EMockRouter(fixture.relay, sessions, brokerKey));
+    app.use(buildE2EMockRouter(fixture.relay, brokerKey));
     // A simple downstream handler that reads the raw body — stands in for
     // the /u/:uuid/hooks/* forward handler in src/index.ts.
     app.post(
@@ -462,7 +461,6 @@ describe("e2e-mock router body-passthrough on unrelated routes", () => {
       });
     });
     await fixture.close();
-    sessions.clear();
   });
 
   it("application/json POST body on an unrelated route reaches the downstream raw handler", async () => {
